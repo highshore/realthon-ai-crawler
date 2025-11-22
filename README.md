@@ -159,7 +159,8 @@ Trigger the router Lambda via EventBridge or any custom integration. Include the
 .
 
 ## Module: Two-Stage Resume Summarization Pipeline
-
+- In ETF-backend/etf/src/main/java/com/realthon/etf/ai/OpenAiClient.java
+  
 This module explains the two-stage pipeline used to convert a raw resume into (1) a structured analysis and (2) a human-friendly four-line summary.
 The pipeline is built on top of the OpenAI Chat Completions API and is designed for accuracy, consistency, and natural language quality by separating the logic into two clearly defined stages.
 
