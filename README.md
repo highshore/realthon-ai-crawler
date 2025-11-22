@@ -9,6 +9,7 @@ This repository now only contains the single-purpose scraper used to watch Korea
 | `korea_uni.py` | Fetches configured boards, filters posts from the past week, and sends Kakao messages to the two predefined contacts. |
 | `requirements.txt` | Python dependencies (requests, BeautifulSoup). |
 | `Dockerfile` | AWS Lambda container image definition (Python 3.11 base). |
+| `user_profile.json` | Single-user profile text (just a corpus string) powering OpenAI alignment scoring. |
 
 ## Running locally
 
@@ -17,7 +18,13 @@ pip install -r requirements.txt
 python korea_uni.py
 ```
 
-All Kakao credentials, recipients, and board lists are hard-coded to match the original Apps Script. Adjust the constants near the top of `korea_uni.py` if you need to change recipients, sender keys, or the lookback window.
+All Kakao credentials, recipients, and board lists are hard-coded to match the original Apps Script. Adjust the constants near the top of `korea_uni.py` if you need to change recipients, sender keys, the lookback window, or the OpenAI alignment threshold.
+
+### OpenAI alignment scoring
+
+- Fill `user_profile.json` with the candidate’s background as raw text (the file can be a single JSON string).
+- Export `OPENAI_API_KEY` and optionally `OPENAI_MODEL` (defaults to `gpt-4o-mini`).
+- The crawler asks the OpenAI Responses API for a 0–100 relevance score for each notice title. Only notices scoring above `ALIGNMENT_THRESHOLD` (default 65) trigger Kakao notifications. Running without an API key keeps all posts (score defaults to 100).
 
 ## Lambda deployment (container image)
 
