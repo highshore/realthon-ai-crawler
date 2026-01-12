@@ -1,23 +1,27 @@
-# 1. 일반 파이썬 이미지 사용
 FROM python:3.11-slim
+# 시스템 의존성 설치 (오타 방지를 위해 한 줄로 구성 권장)
+RUN apt-get update && apt-get install -y \
+    tesseract-ocr \
+    tesseract-ocr-kor \
+    libgl1 \
+    libglib2.0-0 \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# 2. 작업 디렉토리 설정
+
+# 환경 변수 설정
+ENV PYTHONPATH=/app
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+
 WORKDIR /app
 
-# 3. 필수 패키지 설치
+# 라이브러리 설치
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install numpy opencv-python pytesseract pillow
 
-# 4. 소스 코드 및 프로필 복사
-# 이 단계에서 user_profile.json이 /app/user_profile.json 경로에 위치하게 됩니다.
+# 소스 복사
 COPY . .
 
-# 5. 환경 변수 및 Python 경로 설정
-# 현재 위치를 PYTHONPATH에 추가하여 app.jobs 등을 정상적으로 import 하도록 합니다.
-ENV PYTHONPATH=/app
-ENV LANG C.UTF-8
-ENV LC_ALL C.UTF-8
-WORKDIR /app
-# 6. 실행 명령어
-# korea_university.py가 app/jobs/ 안에 있다면 아래 경로로 실행해야 합니다.
+# 실행 명령어
 CMD ["python", "app/jobs/korea_university.py"]

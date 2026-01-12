@@ -1,6 +1,12 @@
 from __future__ import annotations
+
+import pytesseract
+from PIL import Image
+from io import BytesIO
 import json
+
 import logging
+import sys
 import os
 from datetime import datetime, timedelta
 from typing import Any
@@ -8,34 +14,66 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 from zoneinfo import ZoneInfo
+import numpy as np
+import cv2
 from google import genai  # 신형 라이브러리
+
+def preprocess_for_ocr(pil_img: Image.Image) -> Image.Image:
+    img = np.array(pil_img)
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    _, thresh = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)
+    return Image.fromarray(thresh)
+
+pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
+def extract_text_from_image(img_url: str) -> str:
+    try:
+        resp = session.get(img_url, timeout=HTTP_TIMEOUT)
+        LOG.info(f"OCR 이미지 다운로드: {resp.status_code}, {resp.headers.get('Content-Type')}")
+
+        if "image" not in resp.headers.get("Content-Type", ""):
+            LOG.error("이미지가 아님")
+            return ""
+
+        img = Image.open(BytesIO(resp.content))
+        processed = preprocess_for_ocr(img)
+
+        text = pytesseract.image_to_string(
+            processed,
+            lang="kor+eng",
+            config="--oem 3 --psm 6"
+        )
+        return text.strip()
+    except Exception as e:
+        LOG.error(f"OCR 실패: {e}")
+        return ""
+
 # --- 추가된 2차 크롤링 함수 ---
 def fetch_post_content(link: str) -> tuple[str, list[str]]:
-    """상세 페이지에서 본문 텍스트와 이미지 URL 리스트를 추출합니다."""
     try:
         resp = session.get(link, timeout=HTTP_TIMEOUT)
-        resp.encoding = 'utf-8' # 한글 깨짐 방지
+        resp.encoding = 'utf-8'
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
         
-        # 실제 확인하신 상세 페이지 구조 반영 (.t_view)
-        content_area = soup.select_one(".t_view") or soup.select_one("#jwxe_main_content")
+        # [이미지 분석 기준] image_c87a91.png의 구조 반영
+        # 본문 텍스트와 이미지가 모두 들어있는 fr-view 클래스를 먼저 찾습니다.
+        content_area = soup.select_one(".fr-view") or soup.select_one(".article-text") or soup.select_one(".t_view")
         
         if content_area:
-            # 1. 본문 텍스트 추출
-            text = content_area.get_text(strip=True)
+            text = content_area.get_text(" ", strip=True) # 텍스트 간 공백 추가
             
-            # 2. 이미지 URL 추출 (bs4 활용)
-            # 상대 경로를 절대 경로로 변환하기 위해 urljoin 사용
+            # 이미지 태그 추출 및 절대 경로 변환
             img_tags = content_area.find_all("img")
-            img_urls = [urljoin(link, img.get("src")) for img in img_tags if img.get("src")]
+            img_urls = []
+            for img in img_tags:
+                src = img.get("src") or img.get("data-path") # data-path 속성도 체크
+                if src:
+                    img_urls.append(urljoin(link, src))
             
             return text, img_urls
         return "본문을 찾을 수 없습니다.", []
     except Exception as e:
-        LOG.error(f"추출 에러 ({link}): {e}")
-        return f"에러 발생: {e}", []
-    
+        return f"에러 발생: {e}", []    
 BASE_URL_DEFAULT = "https://info.korea.ac.kr/info/board/"
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "15"))
 SENDER_KEY = os.getenv("KAKAO_SENDER_KEY")
@@ -43,8 +81,12 @@ SECRET_KEY = os.getenv("KAKAO_SECRET_KEY")
 APP_KEY = os.getenv("KAKAO_APP_KEY")
 TEMPLATE_CODE = "send-article"
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO))
-LOG = logging.getLogger("korea_university")
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)] 
+)
+LOG = logging.getLogger(__name__)
 
 # 환경 변수 및 설정
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -202,21 +244,26 @@ def evaluate_posts(profile_text: str, board_name: str, posts: list[dict[str, str
     for post in posts:
         post_copy = dict(post)
         decision, rationale = score_notice(profile_text, post_copy["title"], post_copy["link"])
-        
         post_copy["reason"] = rationale
         post_copy["aligned"] = decision
         
-        if decision: # AI 판정이 YES일 때만 2차 크롤링 수행
-            LOG.info(f"🔍 YES 공지 발견! 본문/이미지 추출: {post_copy['title']}")
-            full_text, img_urls = fetch_post_content(post_copy["link"]) # [수정 지점]
+        if decision: # AI가 제목만 보고 YES라고 한 경우
+            LOG.info(f"🔍 YES 공지 발견! 본문/이미지 분석 시작: {post_copy['title']}")
+            full_text, img_urls = fetch_post_content(post_copy["link"])
             
-            post_copy["full_content"] = full_text
-            post_copy["images"] = img_urls # 이미지 주소 리스트 저장
-            aligned.append(post_copy)
+            ocr_combined_text = ""
+            for url in img_urls:
+                # OCR 실행 (여기서 에러가 나면 빈 문자열 반환)
+                ocr_result = extract_text_from_image(url)
+                if ocr_result:
+                    ocr_combined_text += f"\n\n--- [이미지 텍스트 시작] ---\n{ocr_result}\n--- [이미지 텍스트 끝] ---\n"
+            
+            # 최종 결과물에 합치기
+            post_copy["full_content"] = full_text + ocr_combined_text
+            post_copy["images"] = img_urls
             
         evaluated.append(post_copy)
     return aligned, evaluated
-
 
 def notify(board: dict[str, str], posts: list[dict[str, Any]], recipients: list[dict[str, str]]) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []

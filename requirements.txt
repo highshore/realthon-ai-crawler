@@ -1,4 +1,6 @@
-beautifulsoup4==4.12.3
-requests==2.32.3
 tzdata
+requests
+beautifulsoup4
 google-genai
+pytesseract
+Pillow
