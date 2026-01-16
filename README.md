@@ -242,3 +242,70 @@ Predictable and reliable results for production use
         │
         ▼
    [Final Output Summary]
+
+🛠 GCP Deployment & Execution Guide
+본 프로젝트는 Google Cloud Platform(GCP) 환경에서 서버리스로 크롤링을 수행하도록 설계되었습니다. 다음은 새로운 환경에서 본 서비스를 구축하고 실행하기 위한 가이드라인입니다.
+
+1. 전제 조건 (Prerequisites)
+GCP 프로젝트: 생성 및 결제 계정 연결 완료
+
+gcloud CLI: 로컬 PC 설치 및 초기화 (gcloud init)
+
+권한: 프로젝트 편집자(Editor) 이상의 권한 권장
+
+2. 환경 설정 및 API 활성화
+먼저 필요한 GCP 서비스를 활성화해야 합니다.
+
+Bash
+
+gcloud services enable run.googleapis.com \
+    cloudbuild.googleapis.com \
+    cloudscheduler.googleapis.com \
+    iam.googleapis.com
+3. 컨테이너 이미지 빌드 및 배포
+Cloud Build를 통해 소스 코드를 Docker 이미지로 빌드하고 Cloud Run에 배포합니다. (Dockerfile이 루트에 있어야 함)
+
+Bash
+
+# 이미지 빌드
+gcloud builds submit --tag gcr.io/[PROJECT_ID]/allyeojujob-crawler .
+
+# Cloud Run 서비스 배포
+gcloud run deploy allyeojujob \
+    --image gcr.io/[PROJECT_ID]/allyeojujob-crawler \
+    --region asia-northeast3 \
+    --no-allow-unauthenticated
+Note: 보안을 위해 --no-allow-unauthenticated를 사용하여 인증된 요청만 허용합니다.
+
+4. 서비스 계정 및 IAM 권한 설정
+스케줄러가 Cloud Run을 자동으로 호출할 수 있도록 전용 서비스 계정을 생성하고 권한을 부여합니다.
+
+Bash
+
+# 1. 서비스 계정 생성
+gcloud iam service-accounts create crawler-scheduler-sa
+
+# 2. Cloud Run 호출 권한(Invoker) 부여
+gcloud run services add-iam-policy-binding allyeojujob \
+    --member="serviceAccount:crawler-scheduler-sa@[PROJECT_ID].iam.gserviceaccount.com" \
+    --role="roles/run.invoker" \
+    --region=asia-northeast3
+5. Cloud Scheduler 자동화 설정
+정해진 시간에 크롤러가 작동하도록 스케줄을 생성합니다. (예: 매일 오전 9시 한국 시간 기준)
+
+Bash
+
+gcloud scheduler jobs create http ku-crawl-job \
+    --schedule="0 9 * * *" \
+    --time-zone="Asia/Seoul" \
+    --uri="[CLOUD_RUN_SERVICE_URL]" \
+    --http-method=POST \
+    --message-body='{"url": "https://info.korea.ac.kr/info/board/"}' \
+    --oidc-service-account-email="crawler-scheduler-sa@[PROJECT_ID].iam.gserviceaccount.com" \
+    --location=asia-northeast3
+6. 실행 및 모니터링
+수동 실행 테스트: gcloud scheduler jobs run ku-crawl-job --location=asia-northeast3
+
+로그 확인: GCP Console > Cloud Run > allyeojujob > '로그' 탭에서 실시간 크롤링 현황 확인 가능
+
+팁: 이 매뉴얼은 인프라 설정을 포함하고 있으므로, 팀원들이 각자의 GCP 프로젝트에서 독립적으로 동일한 환경을 구축하는 데 도움이 됩니다.
