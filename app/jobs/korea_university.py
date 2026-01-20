@@ -77,6 +77,7 @@ def extract_text_from_image(img_url: str, parent_link: str) -> str:
 
 # --- 추가된 2차 크롤링 함수 ---
 def fetch_post_content(link: str) -> tuple[str, list[str]]:
+    print(f"Fetching post content from: {link}")
     try:
         resp = requests.session.get(link, timeout=HTTP_TIMEOUT)
         resp.encoding = 'utf-8'
@@ -209,6 +210,7 @@ def ask_ai(prompt: str) -> tuple[float, str]:
         import traceback
         LOG.error(traceback.format_exc())
         return 0.0, f"failure: {repr(str(e))}"
+    
 def score_notice(profile_text: str, title: str, link: str) -> tuple[float, str]:
     if not profile_text: return 0.0, "no-profile"
     
@@ -221,6 +223,7 @@ def score_notice(profile_text: str, title: str, link: str) -> tuple[float, str]:
     The score must be between 0.0 and 1.0.
     Respond ONLY with a valid JSON object. Do not include markdown code blocks
     """
+    return ask_ai(user_prompt)
     
     try:
         response_text = ask_ai(user_prompt)
@@ -231,6 +234,8 @@ def score_notice(profile_text: str, title: str, link: str) -> tuple[float, str]:
         return float(res_json.get("score", 0.0)), res_json.get("reason", "분석 완료")
     except:
         return 0.0, "AI 분석 실패"
+    
+    
 
 
 def normalize_base(url: str | None) -> str:
@@ -312,21 +317,22 @@ def parse_posts(html: str, page_url: str) -> list[dict[str, str]]:
 
 
 def evaluate_posts(profile_text: str, board_name: str, posts: list[dict[str, str]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    LOG.info(f"Evaluating posts for board: {board_name} with {len(posts)} posts")
     aligned: list[dict[str, Any]] = []
     evaluated: list[dict[str, Any]] = []
-    
+    THRESHOLD = 0.7
     for post in posts:
         post_copy = dict(post)
-        decision, rationale = score_notice(profile_text, post_copy["title"], post_copy["link"])
+        score, rationale = score_notice(profile_text, post_copy["title"], post_copy["link"])
         post_copy["reason"] = rationale
-        post_copy["aligned"] = decision
+        post_copy["relevance_score"] = score # 실제 점수 저장
         
         # 필드 초기화
         post_copy["full_content"] = ""
         post_copy["images"] = []
 
-        if decision: 
-            LOG.info(f"🔍 [분석 시작] 제목: {post_copy['title']}")
+        if score >= THRESHOLD:
+            LOG.info(f"✅ 적합 판정({score}점): {post_copy['title']}")            
             full_text, img_urls = fetch_post_content(post_copy["link"])
             
             ocr_combined_text = ""
@@ -345,10 +351,10 @@ def evaluate_posts(profile_text: str, board_name: str, posts: list[dict[str, str
             LOG.info(f"   └ 본문 텍스트 길이: {len(full_text)}")
             LOG.info(f"   └ 이미지 OCR 텍스트 길이: {len(ocr_combined_text)}")
             LOG.info(f"   └ 최종 full_content 길이: {len(post_copy['full_content'])}")
-            
             aligned.append(post_copy)
             
         evaluated.append(post_copy)
+        print('eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', post_copy)
     return aligned, evaluated
 
 def notify(board: dict[str, str], posts: list[dict[str, Any]], recipients: list[dict[str, str]]) -> list[dict[str, Any]]:
@@ -387,8 +393,12 @@ def process_board(board: dict[str, str], base_url: str, profile_text: str, recip
         page_url, html = fetch_board(base_url, board)
         posts = parse_posts(html, page_url)
         aligned, evaluated = evaluate_posts(profile_text, board["name"], posts)
+
+        print(profile_text,"ddddddddddddddddddddddddddddddddd", board["name"], posts)
+        LOG.info(f"📝 {board['name']} 평가 완료: 총 {len(posts)}건 중 {len(aligned)}건 적합")
     except Exception as exc:
-        LOG.exception("Board fetch error for %s: %s", board["name"], exc)
+        LOG.info("Board fetch error for %s: %s", board["name"], exc)
+
         return {"board": board["name"], "error": str(exc), "posts": [], "sent": [], "evaluated": []}
     
     # [설정] 카카오 전송을 잠시 막고 싶을 때 아래를 주석 처리합니다.
@@ -399,21 +409,21 @@ def process_board(board: dict[str, str], base_url: str, profile_text: str, recip
     return {"board": board["name"], "posts": aligned, "sent": sent, "evaluated": evaluated}
 
 # 크롤링 대상 게시판 정의 (코드 상단에 없다면 추가하세요)
-
 def run(event: dict[str, Any], context: Any | None = None) -> dict[str, Any]:
     global RECIPIENTS_DEFAULT, BOARDS_DEFAULT
-    logger.info("--- [CRAWLER START] ---")
+    
+    # [LOG] 인풋 데이터 시각화
+    LOG.info("📥 [INCOMING JSON] " + json.dumps(event, ensure_ascii=False))
     
     # 1. 인풋 데이터 확보
+    user_id = event.get("userId", "unknown")
     user_profile = event.get("userProfile", {})
     profile_summary = user_profile.get("summary", "")
     target_url = event.get("targetUrl") or BASE_URL_DEFAULT
-    recipients = event.get("recipients", RECIPIENTS_DEFAULT) # 기본 수신자 사용
     
     base_url = normalize_base(target_url)
     
-    # 2. 실행 모드 결정
-    # targetUrl에 특정 카테고리가 포함되어 있으면 그 게시판만, 아니면 전체 순회
+    # 2. 크롤링 로직 실행 (기존과 동일)
     target_boards = BOARDS_DEFAULT
     for b in BOARDS_DEFAULT:
         if b['category'] in target_url:
@@ -421,46 +431,48 @@ def run(event: dict[str, Any], context: Any | None = None) -> dict[str, Any]:
             break
 
     all_reports = []
-    
-    # 3. 핵심 엔진(process_board) 실행
     for board in target_boards:
-        LOG.info(f"🚀 {board['name']} 크롤링 시작...")
-        report = process_board(board, base_url, profile_summary, recipients)
+        report = process_board(board, base_url, profile_summary, [])
         all_reports.append(report)
 
-    # 4. 최종 아웃풋 규격 조립
-    # 여러 게시판 중 'aligned'(적합) 판정된 글이 하나라도 있는지 확인
+    # 3. 데이터 매핑
     aligned_total = []
     for r in all_reports:
         aligned_total.extend(r.get("posts", []))
+    
+    aligned_total.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
 
+    # 4. 아웃풋 조립
     if not aligned_total:
-        return {
+        final_output = {
             "status": "SUCCESS",
             "relevanceScore": 0.0,
-            "data": {"message": "적합한 새로운 공지가 없습니다.", "timestamp": datetime.now(TIMEZONE).isoformat()}
+            "data": None
+        }
+    else:
+        best_post = aligned_total[0]
+        final_output = {
+            "status": "SUCCESS",
+            "relevanceScore": best_post.get("relevance_score", 0.0),
+            "data": {
+                "category": best_post.get("category", "공지"),
+                "title": best_post["title"],
+                "sourceName": "고려대학교 정보대학",
+                "summary": best_post.get("reason", "분석 완료"),
+                "originalUrl": best_post["link"],
+                "timestamp": datetime.now(TIMEZONE).isoformat()
+            }
         }
 
-    # 가장 최신/점수가 높은 공지 하나를 대표로 반환 (규격 준수)
-    best_post = aligned_total[0]
+    # [LOG] 아웃풋 데이터 시각화
+    # 이 로그를 보면 백엔드로 쏴주는 JSON 형태를 바로 확인할 수 있습니다.
+    LOG.info("📤 [OUTGOING JSON] " + json.dumps(final_output, ensure_ascii=False, indent=2))
     
-    response = {
-        "status": "SUCCESS",
-        "relevanceScore": 1.0, # aligned 리스트에 들어왔다는 건 적합하다는 뜻
-        "data": {
-            "category": best_post.get("category", "공지"),
-            "title": best_post["title"],
-            "sourceName": "고려대학교 정보대학",
-            "summary": best_post.get("reason", "요약 생성 실패"),
-            "fullContent": best_post.get("full_content", ""), # OCR 결과 포함
-            "originalUrl": best_post["link"],
-            "images": best_post.get("images", []),
-            "timestamp": datetime.now(TIMEZONE).isoformat()
-        }
-    }
+    # [추가] 외부 백엔드 URL로 전송 로직 (필요 시 주석 해제)
+    # backend_url = "https://your-api.com/receive"
+    # requests.post(backend_url, json={**final_output, "userId": user_id})
 
-    logger.info(f"--- [CRAWLER END] ---")
-    return response
+    return final_output
 if __name__ == "__main__":
     # 1. 로그 설정
     logging.basicConfig(level=logging.INFO)
