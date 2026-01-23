@@ -140,7 +140,7 @@ LOG = logging.getLogger(__name__)
 
 # 환경 변수 및 설정
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "7"))
+LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "70"))
 TIMEZONE = ZoneInfo("Asia/Seoul")
 
 # [핵심 수정] 신형 라이브러리 설정 방식

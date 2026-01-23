@@ -19,11 +19,17 @@ RUN apt-get update && apt-get install -y \
 # 5. 종속성 파일 복사 및 설치
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install fastapi uvicorn
 
-# 6. [중요] 현재 폴더의 모든 코드를 컨테이너로 복사
+# 코드 복사
 WORKDIR /app
 
 COPY . .
 
+# 실행 명령어 (app/main.py 안에 app이 있으므로 아래와 같이 설정)
+# 만약 main.py가 root에 있다면 "main:app"으로 쓰세요.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
+
+# 6. [중요] 현재 폴더의 모든 코드를 컨테이너로 복사
+
 # 7. 실행 명령어
-CMD ["python", "-m", "app.router", "event.json"]
