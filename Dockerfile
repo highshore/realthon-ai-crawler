@@ -1,23 +1,35 @@
-# 1. 일반 파이썬 이미지 사용
+# 1. 파이썬 환경 설정
 FROM python:3.11-slim
 
-# 2. 작업 디렉토리 설정
-WORKDIR /app
-
-# 3. 필수 패키지 설치
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# 4. 소스 코드 및 프로필 복사
-# 이 단계에서 user_profile.json이 /app/user_profile.json 경로에 위치하게 됩니다.
-COPY . .
-
-# 5. 환경 변수 및 Python 경로 설정
-# 현재 위치를 PYTHONPATH에 추가하여 app.jobs 등을 정상적으로 import 하도록 합니다.
-ENV PYTHONPATH=/app
+# 2. 한글 및 로그 버퍼링 설정 (ASCII 에러 방지)
 ENV LANG C.UTF-8
 ENV LC_ALL C.UTF-8
+ENV PYTHONIOENCODING=utf-8
+ENV PYTHONUNBUFFERED=1
+
+# 3. 작업 디렉토리 설정
+
+# 4. 필수 라이브러리 설치 (Tesseract OCR 포함)
+RUN apt-get update && apt-get install -y \
+    tesseract-ocr \
+    tesseract-ocr-kor \
+    libgl1 \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+# 5. 종속성 파일 복사 및 설치
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install fastapi uvicorn
+
+# 코드 복사
 WORKDIR /app
-# 6. 실행 명령어
-# korea_university.py가 app/jobs/ 안에 있다면 아래 경로로 실행해야 합니다.
-CMD ["python", "app/jobs/korea_university.py"]
+
+COPY . .
+
+# 실행 명령어 (app/main.py 안에 app이 있으므로 아래와 같이 설정)
+# 만약 main.py가 root에 있다면 "main:app"으로 쓰세요.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
+
+# 6. [중요] 현재 폴더의 모든 코드를 컨테이너로 복사
+
+# 7. 실행 명령어
