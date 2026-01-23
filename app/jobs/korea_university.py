@@ -36,94 +36,10 @@ session = requests.Session()
 session.headers.update({
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 })
-
-print("########################################")
-print("#  THIS IS  - FINAL CHECK    #")
-print("########################################")
 load_dotenv() # .env 파일을 읽어서 os.getenv가 값을 찾을 수 있게 해줌
-
-def preprocess_for_ocr(pil_img: Image.Image) -> Image.Image:
-    img = np.array(pil_img)
-    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    _, thresh = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)
-    return Image.fromarray(thresh)
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 pytesseract.pytesseract.tesseract_cmd = '/usr/bin/tesseract'
-def extract_text_from_image(img_url: str, parent_link: str) -> str:
-    try:
-        resp = session.get(img_url, timeout=HTTP_TIMEOUT)
-        # 로그에 원본 게시글 링크(parent_link)를 포함하여 출력
-        LOG.info(f"📸 이미지 다운로드 시도: {img_url} (출처: {parent_link})")
-        LOG.info(f"   └ 응답: {resp.status_code}, 타입: {resp.headers.get('Content-Type')}")
-
-        if "image" not in resp.headers.get("Content-Type", "").lower():
-            LOG.error(f"   └ 실패: 이미지가 아님 ({img_url})")
-            return ""
-
-        img = Image.open(BytesIO(resp.content))
-        processed = preprocess_for_ocr(img)
-
-        text = pytesseract.image_to_string(
-            processed,
-            lang="kor+eng",
-            config="--oem 3 --psm 6"
-        )
-        LOG.info(f"   └ OCR 처리 완료 (글자 수: {len(text.strip())})")
-        return text.strip()
-    except Exception as e:
-        LOG.error(f"   └ OCR 실패 ({img_url}): {e}")
-        return ""
-
-# --- 추가된 2차 크롤링 함수 ---
-def fetch_post_content(link: str) -> tuple[str, list[str]]:
-    print(f"Fetching post content from: {link}")
-    try:
-        resp = requests.session.get(link, timeout=HTTP_TIMEOUT)
-        resp.encoding = 'utf-8'
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        
-        # 1. 본문 영역 탐색 (가장 정확한 선택자 순서)
-        # 정보대 게시물은 보통 .view-con 안에 .fr-view가 들어있는 구조입니다.
-        content_area = (
-                soup.select_one(".view-con") or 
-                soup.select_one(".fr-view") or 
-                soup.select_one("#article_text") or # 추가
-                soup.select_one(".board-view-content") # 추가
-            )
-        
-        if content_area:
-            text = content_area.get_text(" ", strip=True)
-            
-            # 2. 이미지 추출 (보여주신 태그 구조 반영)
-            img_tags = content_area.find_all("img")
-            img_urls = []
-            
-            for img in img_tags:
-                # src와 data-path를 모두 확인
-                src = img.get("src") or img.get("data-path")
-                
-                if src:
-                    # 필터링: 에디터 아이콘이나 아주 작은 이미지는 제외 (OCR 효율성)
-                    if any(x in src for x in ["/icon/", "base64", "emoji"]):
-                        continue
-                    
-                    # 상대 경로(/_res/...)를 절대 경로로 결합
-                    # urljoin은 link가 https://info.korea.ac.kr/... 이므로 알아서 합쳐줍니다.
-                    full_url = urljoin(link, src)
-                    img_urls.append(full_url)
-            
-            LOG.info(f"✅ 이미지 감지 성공: {len(img_urls)}개 발견 (URL: {link})")
-            return text, img_urls
-            
-        LOG.warning(f"⚠️ 본문 영역 탐색 실패: {link}")
-        return "본문을 찾을 수 없습니다.", []
-        
-    except Exception as e:
-        LOG.error(f"❌ 2차 크롤링 에러: {e}")
-        return f"에러 발생: {e}", []
-    
 BASE_URL_DEFAULT = "https://info.korea.ac.kr/info/board/"
 HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "15"))
 SENDER_KEY = os.getenv("KAKAO_SENDER_KEY")
@@ -137,18 +53,215 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)] 
 )
 LOG = logging.getLogger(__name__)
-
-# 환경 변수 및 설정
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "70"))
 TIMEZONE = ZoneInfo("Asia/Seoul")
+# [추가] AI 제공자를 환경변수에서 선택 (기본값: gemini)
+AI_PROVIDER = os.getenv("AI_PROVIDER", "gemini").lower() 
+# OpenAI 키도 필요하면 여기서 불러오기 (나중을 위해)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+# app/jobs/korea_university.py 내 send_kakao 수정
 
-# [핵심 수정] 신형 라이브러리 설정 방식
 if GEMINI_API_KEY:
     client = genai.Client(api_key=GEMINI_API_KEY)
 else:
     LOG.warning("GEMINI_API_KEY is missing!")
     client = None
+# 전체 크롤링 프로세스를 제어
+def run(event: dict[str, Any], context: Any | None = None) -> dict[str, Any]:
+    global RECIPIENTS_DEFAULT, BOARDS_DEFAULT
+    
+    # [LOG] 인풋 데이터 시각화
+    LOG.info("📥 [INCOMING JSON] " + json.dumps(event, ensure_ascii=False))
+    
+    # 1. 인풋 데이터 확보
+    user_id = event.get("userId", "unknown")
+    user_profile = event.get("userProfile", {})
+    profile_summary = user_profile.get("summary", "")
+    target_url = event.get("targetUrl") or BASE_URL_DEFAULT
+    
+    base_url = normalize_base(target_url)
+    
+    # 2. 크롤링 로직 실행 (기존과 동일)
+    target_boards = BOARDS_DEFAULT
+    for b in BOARDS_DEFAULT:
+        if b['category'] in target_url:
+            target_boards = [b]
+            break
+
+    all_reports = []
+    for board in target_boards:
+        try:
+            # [1단계] 게시판 목록 가져오기
+            page_url, html = fetch_board(base_url, board)
+            
+            # [2단계] 날짜 필터링을 적용하여 게시글 파싱
+            # (intervalDays를 넘겨주어 '입구 컷' 로직 수행)
+            posts = parse_posts(html, page_url, interval)
+            
+            # [3단계] AI 스코어링 및 상세 내용(OCR 포함) 추출
+            # evaluate_posts 내부에서 score_notice를 호출합니다.
+            aligned, _ = evaluate_posts(user_profile, board["name"], posts)
+            
+            aligned_total.extend(aligned)
+            LOG.info(f"📝 {board['name']} 완료: {len(aligned)}건 적합")
+            
+        except Exception as exc:
+            LOG.error(f"❌ {board['name']} 처리 중 에러: {exc}")
+    # 3. 데이터 매핑
+    aligned_total = []
+    for r in all_reports:
+        aligned_total.extend(r.get("posts", []))
+    
+    aligned_total.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
+
+    # 4. 아웃풋 조립
+    if not aligned_total:
+        final_output = {
+            "status": "SUCCESS",
+            "relevanceScore": 0.0,
+            "data": None
+        }
+    else:
+        best_post = aligned_total[0]
+        final_output = {
+            "status": "SUCCESS",
+            "relevanceScore": best_post.get("relevance_score", 0.0),
+            "data": {
+                "category": best_post.get("category", "공지"),
+                "title": best_post["title"],
+                "sourceName": "고려대학교 정보대학",
+                "summary": best_post.get("reason", "분석 완료"),
+                "originalUrl": best_post["link"],
+                "timestamp": datetime.now(TIMEZONE).isoformat()
+            }
+        }
+
+    # [LOG] 아웃풋 데이터 시각화
+    # 이 로그를 보면 백엔드로 쏴주는 JSON 형태를 바로 확인할 수 있습니다.
+    LOG.info("📤 [OUTGOING JSON] " + json.dumps(final_output, ensure_ascii=False, indent=2))
+    
+    # [추가] 외부 백엔드 URL로 전송 로직 (필요 시 주석 해제)
+    # backend_url = "https://your-api.com/receive"
+    # requests.post(backend_url, json={**final_output, "userId": user_id})
+
+    return final_output
+
+# 입력받은 URL을 크롤링하기 적합한 표준형태로 변환
+def normalize_base(url: str | None) -> str: 
+    if not url:
+        return BASE_URL_DEFAULT
+    trimmed = url.strip()
+    if trimmed.endswith(".do"):
+        trimmed = trimmed[: trimmed.rfind("/") + 1]
+    return f"{trimmed.rstrip('/')}/"
+
+# fetch_board(base_url, board): 특정 게시판 카테고리의 URL을 생성하고 해당 페이지의 HTML 소스를 가져옵니다.
+def fetch_board(base_url: str, board: dict[str, str]) -> tuple[str, str]:
+    page_url = f"{base_url}{board['category']}.do"
+    resp = session.get(page_url, timeout=HTTP_TIMEOUT)
+    resp.raise_for_status()
+    return page_url, resp.text
+# HTML에서 공지사항 목록을 추출합니다. interval_days를 기준으로 이전 날짜의 글이 나오면 즉시 중단(break)하여 불필요한 탐색을 방지합니다. 
+def parse_posts(html: str, page_url: str) -> list[dict[str, str]]:
+
+    soup = BeautifulSoup(html, "html.parser")
+    today = datetime.now(TIMEZONE).date()
+    cutoff = today - timedelta(days=LOOKBACK_DAYS - 1)
+    posts: list[dict[str, str]] = []
+    
+    for row in soup.select("tr"):
+        cells = row.find_all("td")
+        if not cells:
+            continue
+        
+        # 날짜 파싱 (고려대 형식: YYYY.MM.DD)
+        date_text = cells[-1].get_text(strip=True)
+        try:
+            row_date = datetime.strptime(date_text, "%Y.%m.%d").date()
+        except ValueError:
+            continue
+            
+        if row_date < cutoff:
+            continue
+            
+        link_tag = row.select_one("a.article-title")
+        if not link_tag:
+            continue
+            
+        href = (link_tag.get("href") or "").replace("amp;", "")
+        title = link_tag.get_text(strip=True)
+        posts.append({"title": title, "link": urljoin(page_url, href)})
+        
+    return posts
+
+# 수집된 목록을 순회하며 AI 점수를 매기고, 기준치(THRESHOLD) 이상인 게시물만 상세 내용을 추출합니다.
+def evaluate_posts(profile_text: str, board_name: str, posts: list[dict[str, str]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    LOG.info(f"Evaluating posts for board: {board_name} with {len(posts)} posts")
+    aligned: list[dict[str, Any]] = []
+    evaluated: list[dict[str, Any]] = []
+    THRESHOLD = 0.7
+    for post in posts:
+        post_copy = dict(post)
+        score, rationale = score_notice(profile_text, post_copy["title"], post_copy["link"])
+        post_copy["reason"] = rationale
+        post_copy["relevance_score"] = score # 실제 점수 저장
+        
+        # 필드 초기화
+        post_copy["full_content"] = ""
+        post_copy["images"] = []
+
+        if score >= THRESHOLD:
+            LOG.info(f"✅ 적합 판정({score}점): {post_copy['title']}")            
+            full_text, img_urls = fetch_post_content(post_copy["link"])
+            
+            ocr_combined_text = ""
+            for idx, url in enumerate(img_urls):
+                # 이미지별로 순번과 링크를 로그에 남김
+                ocr_result = extract_text_from_image(url, post_copy["link"])
+                if ocr_result:
+                    ocr_combined_text += f"\n\n--- [이미지 #{idx+1} 텍스트 시작] ---\n{ocr_result}\n--- [이미지 #{idx+1} 텍스트 끝] ---\n"
+            
+            # 최종 결합 및 할당
+            post_copy["full_content"] = (full_text + ocr_combined_text).strip()
+            post_copy["images"] = img_urls
+
+            # 로그로 결합 결과 확인
+            LOG.info(f"📊 [결합 완료] {post_copy['title']}")
+            LOG.info(f"   └ 본문 텍스트 길이: {len(full_text)}")
+            LOG.info(f"   └ 이미지 OCR 텍스트 길이: {len(ocr_combined_text)}")
+            LOG.info(f"   └ 최종 full_content 길이: {len(post_copy['full_content'])}")
+            aligned.append(post_copy)
+            
+        evaluated.append(post_copy)
+        print('eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', post_copy)
+    return aligned, evaluated
+# 유저의 전공(major)과 관심 분야(interestFields)를 반영한 프롬프트를 생성하여 AI에게 관련성 점수를 요청합니다.
+def score_notice(profile_text: str, title: str, link: str) -> tuple[float, str]:
+    if not profile_text: return 0.0, "no-profile"
+    
+    # [수정] AI에게 점수(0~1)를 직접 요구하여 relevanceScore 생성
+    user_prompt = f"""
+    Profile: {profile_text}
+    Notice Title: {title}
+    Analyze how relevant this notice is to the profile. 
+    Respond with a JSON object: {{"score": float, "reason": "short explanation in Korean"}}
+    The score must be between 0.0 and 1.0.
+    Respond ONLY with a valid JSON object. Do not include markdown code blocks
+    """
+    return ask_ai(user_prompt)
+    
+    try:
+        response_text = ask_ai(user_prompt)
+        # JSON 부분만 추출 (가장 간단한 방식)
+        start = response_text.find('{')
+        end = response_text.rfind('}') + 1
+        res_json = json.loads(response_text[start:end])
+        return float(res_json.get("score", 0.0)), res_json.get("reason", "분석 완료")
+    except:
+        return 0.0, "AI 분석 실패"
+# genai 클라이언트를 사용하여 Gemini API를 호출하고 결과를 JSON 형태로 파싱하여 반환합니다.
 def ask_ai(prompt: str) -> tuple[float, str]:
     try:
         LOG.info("=== [AI CALL START] ===")
@@ -210,50 +323,84 @@ def ask_ai(prompt: str) -> tuple[float, str]:
         import traceback
         LOG.error(traceback.format_exc())
         return 0.0, f"failure: {repr(str(e))}"
-    
-def score_notice(profile_text: str, title: str, link: str) -> tuple[float, str]:
-    if not profile_text: return 0.0, "no-profile"
-    
-    # [수정] AI에게 점수(0~1)를 직접 요구하여 relevanceScore 생성
-    user_prompt = f"""
-    Profile: {profile_text}
-    Notice Title: {title}
-    Analyze how relevant this notice is to the profile. 
-    Respond with a JSON object: {{"score": float, "reason": "short explanation in Korean"}}
-    The score must be between 0.0 and 1.0.
-    Respond ONLY with a valid JSON object. Do not include markdown code blocks
-    """
-    return ask_ai(user_prompt)
-    
+# 점수가 높은 게시물의 상세 페이지에 접속하여 본문 텍스트와 이미지 URL 목록을 추출합니다.
+def fetch_post_content(link: str) -> tuple[str, list[str]]:
+    print(f"Fetching post content from: {link}")
     try:
-        response_text = ask_ai(user_prompt)
-        # JSON 부분만 추출 (가장 간단한 방식)
-        start = response_text.find('{')
-        end = response_text.rfind('}') + 1
-        res_json = json.loads(response_text[start:end])
-        return float(res_json.get("score", 0.0)), res_json.get("reason", "분석 완료")
-    except:
-        return 0.0, "AI 분석 실패"
+        resp = requests.session.get(link, timeout=HTTP_TIMEOUT)
+        resp.encoding = 'utf-8'
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+        
+        # 1. 본문 영역 탐색 (가장 정확한 선택자 순서)
+        # 정보대 게시물은 보통 .view-con 안에 .fr-view가 들어있는 구조입니다.
+        content_area = (
+                soup.select_one(".view-con") or 
+                soup.select_one(".fr-view") or 
+                soup.select_one("#article_text") or # 추가
+                soup.select_one(".board-view-content") # 추가
+            )
+        
+        if content_area:
+            text = content_area.get_text(" ", strip=True)
+            
+            # 2. 이미지 추출 (보여주신 태그 구조 반영)
+            img_tags = content_area.find_all("img")
+            img_urls = []
+            
+            for img in img_tags:
+                # src와 data-path를 모두 확인
+                src = img.get("src") or img.get("data-path")
+                
+                if src:
+                    # 필터링: 에디터 아이콘이나 아주 작은 이미지는 제외 (OCR 효율성)
+                    if any(x in src for x in ["/icon/", "base64", "emoji"]):
+                        continue
+                    
+                    # 상대 경로(/_res/...)를 절대 경로로 결합
+                    # urljoin은 link가 https://info.korea.ac.kr/... 이므로 알아서 합쳐줍니다.
+                    full_url = urljoin(link, src)
+                    img_urls.append(full_url)
+            
+            LOG.info(f"✅ 이미지 감지 성공: {len(img_urls)}개 발견 (URL: {link})")
+            return text, img_urls
+            
+        LOG.warning(f"⚠️ 본문 영역 탐색 실패: {link}")
+        return "본문을 찾을 수 없습니다.", []
+        
+    except Exception as e:
+        LOG.error(f"❌ 2차 크롤링 에러: {e}")
+        return f"에러 발생: {e}", []
     
-    
+def extract_text_from_image(img_url: str, parent_link: str) -> str:
+    try:
+        resp = session.get(img_url, timeout=HTTP_TIMEOUT)
+        # 로그에 원본 게시글 링크(parent_link)를 포함하여 출력
+        LOG.info(f"📸 이미지 다운로드 시도: {img_url} (출처: {parent_link})")
+        LOG.info(f"   └ 응답: {resp.status_code}, 타입: {resp.headers.get('Content-Type')}")
 
+        if "image" not in resp.headers.get("Content-Type", "").lower():
+            LOG.error(f"   └ 실패: 이미지가 아님 ({img_url})")
+            return ""
 
-def normalize_base(url: str | None) -> str:
-    if not url:
-        return BASE_URL_DEFAULT
-    trimmed = url.strip()
-    if trimmed.endswith(".do"):
-        trimmed = trimmed[: trimmed.rfind("/") + 1]
-    return f"{trimmed.rstrip('/')}/"
+        img = Image.open(BytesIO(resp.content))
+        processed = preprocess_for_ocr(img)
 
-# [추가] AI 제공자를 환경변수에서 선택 (기본값: gemini)
-AI_PROVIDER = os.getenv("AI_PROVIDER", "gemini").lower() 
-# OpenAI 키도 필요하면 여기서 불러오기 (나중을 위해)
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
-# app/jobs/korea_university.py 내 send_kakao 수정
-
-# app/jobs/korea_university.py 의 send_kakao 함수 수정
+        text = pytesseract.image_to_string(
+            processed,
+            lang="kor+eng",
+            config="--oem 3 --psm 6"
+        )
+        LOG.info(f"   └ OCR 처리 완료 (글자 수: {len(text.strip())})")
+        return text.strip()
+    except Exception as e:
+        LOG.error(f"   └ OCR 실패 ({img_url}): {e}")
+        return ""  
+def preprocess_for_ocr(pil_img: Image.Image) -> Image.Image:
+    img = np.array(pil_img)
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    _, thresh = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)
+    return Image.fromarray(thresh)
 def send_kakao(contact: str, template_code: str, template_param: dict[str, str]) -> dict[str, Any]:
     payload = {
         "senderKey": SENDER_KEY,
@@ -277,87 +424,16 @@ def send_kakao(contact: str, template_code: str, template_param: dict[str, str])
     except Exception as e:
         LOG.error("Kakao connection error: %s", e)
         return {"error": str(e)}
-def fetch_board(base_url: str, board: dict[str, str]) -> tuple[str, str]:
-    page_url = f"{base_url}{board['category']}.do"
-    resp = session.get(page_url, timeout=HTTP_TIMEOUT)
-    resp.raise_for_status()
-    return page_url, resp.text
 
 
-def parse_posts(html: str, page_url: str) -> list[dict[str, str]]:
-    soup = BeautifulSoup(html, "html.parser")
-    today = datetime.now(TIMEZONE).date()
-    cutoff = today - timedelta(days=LOOKBACK_DAYS - 1)
-    posts: list[dict[str, str]] = []
-    
-    for row in soup.select("tr"):
-        cells = row.find_all("td")
-        if not cells:
-            continue
-        
-        # 날짜 파싱 (고려대 형식: YYYY.MM.DD)
-        date_text = cells[-1].get_text(strip=True)
-        try:
-            row_date = datetime.strptime(date_text, "%Y.%m.%d").date()
-        except ValueError:
-            continue
-            
-        if row_date < cutoff:
-            continue
-            
-        link_tag = row.select_one("a.article-title")
-        if not link_tag:
-            continue
-            
-        href = (link_tag.get("href") or "").replace("amp;", "")
-        title = link_tag.get_text(strip=True)
-        posts.append({"title": title, "link": urljoin(page_url, href)})
-        
-    return posts
 
 
-def evaluate_posts(profile_text: str, board_name: str, posts: list[dict[str, str]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    LOG.info(f"Evaluating posts for board: {board_name} with {len(posts)} posts")
-    aligned: list[dict[str, Any]] = []
-    evaluated: list[dict[str, Any]] = []
-    THRESHOLD = 0.7
-    for post in posts:
-        post_copy = dict(post)
-        score, rationale = score_notice(profile_text, post_copy["title"], post_copy["link"])
-        post_copy["reason"] = rationale
-        post_copy["relevance_score"] = score # 실제 점수 저장
-        
-        # 필드 초기화
-        post_copy["full_content"] = ""
-        post_copy["images"] = []
 
-        if score >= THRESHOLD:
-            LOG.info(f"✅ 적합 판정({score}점): {post_copy['title']}")            
-            full_text, img_urls = fetch_post_content(post_copy["link"])
-            
-            ocr_combined_text = ""
-            for idx, url in enumerate(img_urls):
-                # 이미지별로 순번과 링크를 로그에 남김
-                ocr_result = extract_text_from_image(url, post_copy["link"])
-                if ocr_result:
-                    ocr_combined_text += f"\n\n--- [이미지 #{idx+1} 텍스트 시작] ---\n{ocr_result}\n--- [이미지 #{idx+1} 텍스트 끝] ---\n"
-            
-            # 최종 결합 및 할당
-            post_copy["full_content"] = (full_text + ocr_combined_text).strip()
-            post_copy["images"] = img_urls
 
-            # 로그로 결합 결과 확인
-            LOG.info(f"📊 [결합 완료] {post_copy['title']}")
-            LOG.info(f"   └ 본문 텍스트 길이: {len(full_text)}")
-            LOG.info(f"   └ 이미지 OCR 텍스트 길이: {len(ocr_combined_text)}")
-            LOG.info(f"   └ 최종 full_content 길이: {len(post_copy['full_content'])}")
-            aligned.append(post_copy)
-            
-        evaluated.append(post_copy)
-        print('eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee', post_copy)
-    return aligned, evaluated
 
-def notify(board: dict[str, str], posts: list[dict[str, Any]], recipients: list[dict[str, str]]) -> list[dict[str, Any]]:
+
+
+
     results: list[dict[str, Any]] = []
     for post in posts:
         title_prefix = "[적합]" if post.get("aligned") else ""
@@ -388,7 +464,6 @@ def notify(board: dict[str, str], posts: list[dict[str, Any]], recipients: list[
     return results
 
 
-def process_board(board: dict[str, str], base_url: str, profile_text: str, recipients: list[dict[str, str]]) -> dict[str, Any]:
     try:
         page_url, html = fetch_board(base_url, board)
         posts = parse_posts(html, page_url)
@@ -409,70 +484,7 @@ def process_board(board: dict[str, str], base_url: str, profile_text: str, recip
     return {"board": board["name"], "posts": aligned, "sent": sent, "evaluated": evaluated}
 
 # 크롤링 대상 게시판 정의 (코드 상단에 없다면 추가하세요)
-def run(event: dict[str, Any], context: Any | None = None) -> dict[str, Any]:
-    global RECIPIENTS_DEFAULT, BOARDS_DEFAULT
-    
-    # [LOG] 인풋 데이터 시각화
-    LOG.info("📥 [INCOMING JSON] " + json.dumps(event, ensure_ascii=False))
-    
-    # 1. 인풋 데이터 확보
-    user_id = event.get("userId", "unknown")
-    user_profile = event.get("userProfile", {})
-    profile_summary = user_profile.get("summary", "")
-    target_url = event.get("targetUrl") or BASE_URL_DEFAULT
-    
-    base_url = normalize_base(target_url)
-    
-    # 2. 크롤링 로직 실행 (기존과 동일)
-    target_boards = BOARDS_DEFAULT
-    for b in BOARDS_DEFAULT:
-        if b['category'] in target_url:
-            target_boards = [b]
-            break
 
-    all_reports = []
-    for board in target_boards:
-        report = process_board(board, base_url, profile_summary, [])
-        all_reports.append(report)
-
-    # 3. 데이터 매핑
-    aligned_total = []
-    for r in all_reports:
-        aligned_total.extend(r.get("posts", []))
-    
-    aligned_total.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
-
-    # 4. 아웃풋 조립
-    if not aligned_total:
-        final_output = {
-            "status": "SUCCESS",
-            "relevanceScore": 0.0,
-            "data": None
-        }
-    else:
-        best_post = aligned_total[0]
-        final_output = {
-            "status": "SUCCESS",
-            "relevanceScore": best_post.get("relevance_score", 0.0),
-            "data": {
-                "category": best_post.get("category", "공지"),
-                "title": best_post["title"],
-                "sourceName": "고려대학교 정보대학",
-                "summary": best_post.get("reason", "분석 완료"),
-                "originalUrl": best_post["link"],
-                "timestamp": datetime.now(TIMEZONE).isoformat()
-            }
-        }
-
-    # [LOG] 아웃풋 데이터 시각화
-    # 이 로그를 보면 백엔드로 쏴주는 JSON 형태를 바로 확인할 수 있습니다.
-    LOG.info("📤 [OUTGOING JSON] " + json.dumps(final_output, ensure_ascii=False, indent=2))
-    
-    # [추가] 외부 백엔드 URL로 전송 로직 (필요 시 주석 해제)
-    # backend_url = "https://your-api.com/receive"
-    # requests.post(backend_url, json={**final_output, "userId": user_id})
-
-    return final_output
 if __name__ == "__main__":
     # 1. 로그 설정
     logging.basicConfig(level=logging.INFO)
