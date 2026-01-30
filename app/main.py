@@ -3,7 +3,7 @@ import requests
 import uvicorn
 from datetime import datetime, timezone
 from fastapi import FastAPI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Dict, Any, List, Optional
 
 # 기존 임포트 경로 유지
@@ -23,8 +23,12 @@ class UserProfile(BaseModel):
 
 class CallbackConfig(BaseModel):
     enabled: bool = True
-    callbackUrl: str
+    callbackUrl: str = Field(
+        default="https://api.allyeojujob.com/ai/callback",
+        description="백엔드 알림 수신 기본 주소"
+    )
     authToken: str
+    
 
 class BatchRequest(BaseModel):
     userId: str
@@ -70,20 +74,21 @@ async def handle_crawl(request_data: BatchRequest):
         return {"status": "ERROR", "message": str(e)}
 
 def send_to_callback(callback_url: str, user_id: str, result: dict):
-    """최종 규격에 맞춰 백엔드로 전송"""
-    # run 함수가 이미 'data'에 필요한 필드를 채워서 줍니다.
-    item = result.get("data") 
-    if not item: return
+    # 백엔드가 '관리'할 수 있도록 URL 끝에 requestId를 동적으로 생성해서 붙여줍니다.
+    # 예: https://api.allyeojujob.com/ai/callback/2024001_0129
+    request_id = f"{user_id}_{datetime.now().strftime('%m%d%H%M')}"
+    final_url = f"{callback_url.rstrip('/')}/{request_id}" 
 
     payload = {
         "status": "SUCCESS",
         "relevanceScore": result.get("relevanceScore", 0.0),
-        "data": item # 이미 category, title, summary, originalUrl 등이 들어있음
+        "data": result.get("data")
     }
 
     try:
-        requests.post(callback_url, json=payload, timeout=30)
-        print("🚀 [Callback] 전송 완료")
+        # 완성된 final_url로 전송해야 백엔드가 404 에러를 내지 않습니다.
+        requests.post(final_url, json=payload, timeout=30)
+        print(f"🚀 [Callback] 전송 완료: {final_url}")
     except Exception as e:
         print(f"❌ [Callback] 실패: {e}")
 if __name__ == "__main__":
