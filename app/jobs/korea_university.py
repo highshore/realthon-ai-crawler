@@ -69,9 +69,6 @@ else:
 # 전체 크롤링 프로세스를 제어
 # app/jobs/korea_university.py
 def run(event: dict[str, Any], context: Any | None = None) -> dict[str, Any]:
-    """
-    최종 진입점: 적합 판정된 '모든' 공지를 리스트 형태로 반환합니다.
-    """
     LOG.info("📥 [데이터 수신] 다중 크롤링 프로세스 시작")
     
     # 1. 인풋 데이터 파싱
@@ -80,79 +77,81 @@ def run(event: dict[str, Any], context: Any | None = None) -> dict[str, Any]:
     interests = ", ".join(user_profile.get("interestFields", []))
     combined_profile = f"전공: {major}, 관심분야: {interests}"
     interval = user_profile.get("intervalDays", 3)
-    
-    target_url = event.get("targetUrl") or BASE_URL_DEFAULT
-    base_url = normalize_base(target_url)
-    
-    # 대상 게시판 결정
-    target_boards = BOARDS_DEFAULT
-    for b in BOARDS_DEFAULT:
-        if b['category'] in target_url:
-            target_boards = [b]
-            break
+    callback_url = event.get("callbackUrl", "")
 
-    total_scanned_count = 0 
+    # [수정] targetUrls 리스트 추출 (없으면 단일 targetUrl이라도 리스트로 변환)
+    raw_urls = event.get("targetUrls") or [event.get("targetUrl")]
+    # 유효한 URL만 필터링 (None 제거)
+    target_urls = [url for url in raw_urls if url]
+    if not target_urls:
+        target_urls = [BASE_URL_DEFAULT]
+
     aligned_total = []
+    total_scanned_count = 0 
 
-    # 각 게시판 순회하며 데이터 수집
-    for board in target_boards:
+    # 2. [핵심] 전달받은 모든 URL을 순회
+    for current_url in target_urls:
+        base_url = normalize_base(current_url)
+        
+        # 현재 URL이 어떤 카테고리에 속하는지 결정
+        current_board = None
+        for b in BOARDS_DEFAULT:
+            if b['category'] in current_url:
+                current_board = b
+                break
+        
+        # 카테고리를 못 찾으면 기본값(정보대소식 등) 설정하거나 스킵
+        if not current_board:
+            LOG.warning(f"⚠️ 카테고리를 알 수 없는 URL 스킵: {current_url}")
+            continue
+
         try:
-            LOG.info(f"🔎 {board['name']} 게시판 분석 시작...")
-            page_url, html = fetch_board(base_url, board)
-            posts = parse_posts(html, page_url, interval) 
+            LOG.info(f"🔎 {current_board['name']} 게시판 분석 시작... ({current_url})")
+            # fetch_board 대신 직접 current_url 사용 (파라미터 유지 때문)
+            resp = session.get(current_url, timeout=HTTP_TIMEOUT)
+            resp.raise_for_status()
+            html = resp.text
             
-            # AI 평가 (관심사에 맞는 글들 필터링)
-            aligned, _ = evaluate_posts(combined_profile, board["name"], posts)
+            posts = parse_posts(html, current_url, interval) 
             total_scanned_count += len(posts)
+            
+            # AI 평가
+            aligned, _ = evaluate_posts(combined_profile, current_board["name"], posts)
             aligned_total.extend(aligned)
             
         except Exception as exc:
-            LOG.error(f"❌ {board['name']} 처리 중 오류: {exc}")
+            LOG.error(f"❌ {current_url} 처리 중 오류: {exc}")
             continue
 
-    # 2. 결과 처리 (상태값 세분화)
+    # 3. 결과 처리
     if total_scanned_count == 0:
-        return {
-            "status": "NO_NEW_POSTS",
-            "data": [], # 빈 리스트 반환
-            "message": f"최근 {interval}일 동안 새로운 공지가 없습니다."
-        }
-            
+        return {"status": "NO_NEW_POSTS", "data": [], "message": "새로운 공지가 없습니다."}
     if not aligned_total:
-        return {
-            "status": "NO_MATCHING_POSTS",
-            "data": [], # 빈 리스트 반환
-            "message": "신규 공지는 있으나 사용자의 관심사와 일치하는 항목이 없습니다."
-        }
+        return {"status": "NO_MATCHING_POSTS", "data": [], "message": "일치하는 항목이 없습니다."}
 
-    # 3. [핵심 수정] 모든 적합 공지에 대해 요약 생성 및 리스트 빌드
-    # 점수 순 정렬 (높은 순)
+    # 4. 요약 생성 (중복 제거 및 정렬)
     aligned_total.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
     
     final_data_list = []
     for post in aligned_total:
         LOG.info(f"📝 요약 생성 중: {post['title']}")
-        summary = summarize_content(
-            user_profile, 
-            post["title"], 
-            post.get("full_content", "")
-        )
-        
+        summary = summarize_content(user_profile, post["title"], post.get("full_content", ""))
+
         final_data_list.append({
             "category": "공지사항",
             "title": post["title"],
             "sourceName": "고려대학교 정보대학",
             "summary": summary,
             "originalUrl": post["link"],
-            "relevanceScore": post.get("relevance_score", 0.0),
+            "relevanceScore": post.get("relevance_score", 0.0), # [추가] 점수 포함
+            "callbackUrl": callback_url,
             "timestamp": datetime.now(TIMEZONE).isoformat()
         })
-    
-    # 최종 결과 반환 (data가 이제 List입니다)
+
     return {
         "status": "SUCCESS",
         "count": len(final_data_list),
-        "data": final_data_list # [변경] 단일 dict -> List[dict]
+        "data": final_data_list
     }
 def normalize_base(url: str | None) -> str: 
     if not url:
@@ -172,42 +171,61 @@ def fetch_board(base_url: str, board: dict[str, str]) -> tuple[str, str]:
 def parse_posts(html: str, page_url: str, interval_days: int) -> list[dict[str, str]]:
     soup = BeautifulSoup(html, "html.parser")
     today = datetime.now(TIMEZONE).date()
-    
-    # LOOKBACK_DAYS 대신 넘겨받은 interval_days 사용
     cutoff = today - timedelta(days=interval_days - 1)
-    posts: list[dict[str, str]] = []
     
-    for row in soup.select("tr"):
+    # ✅ [디버깅] 날짜 범위 로그
+    LOG.info(f"📅 날짜 범위: {cutoff} ~ {today} (interval: {interval_days}일)")
+    
+    posts: list[dict[str, str]] = []
+    all_rows = soup.select("tr")
+    
+    # ✅ [디버깅] 전체 행 개수 로그
+    LOG.info(f"🔍 HTML에서 발견된 전체 <tr> 개수: {len(all_rows)}")
+    
+    row_count = 0
+    for row in all_rows:
         cells = row.find_all("td")
         if not cells:
             continue
         
+        row_count += 1
+        
         # 날짜 파싱 (고려대 형식: YYYY.MM.DD)
         date_text = cells[-1].get_text(strip=True)
+        
+        # ✅ [디버깅] 날짜 파싱 시도 로그
+        LOG.info(f"  [{row_count}] 날짜 텍스트: '{date_text}'")
+        
         try:
             row_date = datetime.strptime(date_text, "%Y.%m.%d").date()
-        except ValueError:
+            LOG.info(f"  └ 파싱된 날짜: {row_date}")
+        except ValueError as e:
+            LOG.warning(f"  └ ❌ 날짜 파싱 실패: {e}")
             continue
             
         if row_date < cutoff:
+            LOG.info(f"  └ ⏭️ 범위 밖 날짜 (cutoff: {cutoff})")
             continue
             
         link_tag = row.select_one("a.article-title")
         if not link_tag:
+            LOG.warning(f"  └ ⚠️ 제목 링크를 찾을 수 없음")
             continue
             
         href = (link_tag.get("href") or "").replace("amp;", "")
         title = link_tag.get_text(strip=True)
-        posts.append({"title": title, "link": urljoin(page_url, href)})
         
+        LOG.info(f"  └ ✅ 수집: {title}")
+        posts.append({"title": title, "link": urljoin(page_url, href)})
+    
+    LOG.info(f"📊 최종 수집된 게시물: {len(posts)}개")
     return posts
-
 # 수집된 목록을 순회하며 AI 점수를 매기고, 기준치(THRESHOLD) 이상인 게시물만 상세 내용을 추출합니다.
 def evaluate_posts(profile_text: str, board_name: str, posts: list[dict[str, str]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     LOG.info(f"Evaluating posts for board: {board_name} with {len(posts)} posts")
     aligned: list[dict[str, Any]] = []
     evaluated: list[dict[str, Any]] = []
-    THRESHOLD = 0.7
+    THRESHOLD = 0.1
     for post in posts:
         post_copy = dict(post)
         score, rationale = score_notice(profile_text, post_copy["title"], post_copy["link"])
@@ -418,7 +436,7 @@ def extract_text_from_image(img_url: str) -> str:
 def preprocess_for_ocr(pil_img: Image.Image) -> Image.Image:
     img = np.array(pil_img)
     gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
-    _, thresh = cv2.threshold(gray, 180, 255, cv2.THRESH_BINARY)
+    _, thresh = cv2.thresholdthreshold(gray, 180, 255, cv2.THRESH_BINARY)
     return Image.fromarray(thresh)
 def send_kakao(contact: str, template_code: str, template_param: dict[str, str]) -> dict[str, Any]:
     payload = {
