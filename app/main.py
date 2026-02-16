@@ -99,7 +99,7 @@ def send_to_callback_list(callback_url: str, notices: List[dict], auth_token: st
     # 실제 콜백 전송
     try:
         response = requests.post(callback_url, json=payload, headers=headers, timeout=60)
-        print(f"📡 콜백 응답 코드: {response.status_code}")
+        print(f"📡 콜백0 응답 코드: {response.status_code}")
     except Exception as e:
         print(f"❌ 콜백 전송 실패: {e}")
 
