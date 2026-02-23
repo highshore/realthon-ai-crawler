@@ -7,8 +7,8 @@ from fastapi import APIRouter # main.py가 에러 안 나게 하기 위해 필�
 router = APIRouter()
 
 # 1. Supabase 설정
-SUPABASE_URL = "https://mlmtacpwmpfxcfzmnfjk.supabase.co"
-SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1sbXRhY3B3bXBmeGNmem1uZmprIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzEyMjY1MDAsImV4cCI6MjA4NjgwMjUwMH0.vzRHX1BGEEIJKUELfQxjkoobhV3Spf7JRSHQ-el1_cU"
+SUPABASE_URL = os.getenv("SUPABASE_URL") 
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 CRAWLER_URL = "https://notice-alarm-service-567168557796.asia-northeast3.run.app/crawl/request"
