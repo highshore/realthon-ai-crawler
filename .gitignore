@@ -1,3 +1,5 @@
 /.env.local
 __pycache__/
 .cursor/
+.env
+check_models.py

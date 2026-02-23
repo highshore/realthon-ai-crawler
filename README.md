@@ -1,244 +1,112 @@
-# Multi-script Lambda Notice Router
 
-One Lambda container receives a JSON payload, routes it by `url`, and executes the matching crawler script. Each script is responsible for fetching notices, calling OpenAI for profile alignment, and (optionally) delivering Kakao Alimtalk messages.
 
-## Layout
+# 🚀 AI 공지사항 크롤러 서비스 (Crawler Service)
 
-| Path | Purpose |
-| --- | --- |
-| `app/router.py` | Lambda entrypoint; inspects `event["url"]` and dispatches to the right job. |
-| `app/jobs/korea_university.py` | Job implementation for Korea University Informatics boards. |
-| `app/jobs/linkareer.py` | Job that scrapes Linkareer intern listings, scores them, and sends Kakao alerts. |
-| `app/jobs/ewha_university.py` | Crawls Ewha Womans University notices, aligns, and notifies. |
-| `app/jobs/sogang_university.py` | Crawls Sogang University API notices, aligns, and notifies. |
-| `app/jobs/firecrawl_fallback.py` | Generic fallback: Firecrawl scrape → OpenAI extraction → alignment → Kakao. |
-| `frontend/` | Next.js React frontend for interacting with the crawler. |
-| `requirements.txt` | Runtime dependencies (requests, BeautifulSoup, OpenAI). |
-| `Dockerfile` | AWS Lambda container image definition (Python 3.11). |
-| `.env.local` | Local-only secrets (e.g., `OPENAI_API_KEY`), ignored by git. |
+이 프로젝트는 대학교 공지사항을 수집하고, **Gemini AI**를 활용하여 사용자의 전공 및 관심 분야에 맞는 공지사항을 선별하여 요약하는 **GCP Cloud Run** 기반의 마이크로서비스입니다.
 
-Add new jobs under `app/jobs/` and register them inside `app/router.py` with a matcher function.
+## 🏗️ 시스템 아키텍처 및 흐름
 
-## Event contract
+1. **Trigger**: Cloud Scheduler가 설정된 주기에 따라 FastAPI 엔드포인트를 호출합니다.
+2. **1차 크롤링**: `intervalDays` 설정을 확인하여 기준 날짜 이후의 최신 공지만 목록화합니다.
+3. **AI 분석**: 유저의 `interestFields`와 공지 제목을 비교하여 중요도 점수(0~1)를 산출합니다.
+4. **2차 크롤링**: 고득점 공지에 한해 상세 본문 및 이미지(OCR)를 추출하고 내용을 요약합니다.
+5. **Data Delivery**: 최종 분석된 JSON 결과를 백엔드 서버로 전송합니다.
 
-Example payload:
+---
 
-```json
-{
-  "url": "https://info.korea.ac.kr/info/board/notice_under.do",
-  "user_profile": "Raw text used for OpenAI alignment",
-  "recipients": [
-    {"name": "고려대 학부생 김수겸", "contact": "01068584123"}
-  ]
-}
+## 📂 주요 파일 구조 및 역할
+
+실행 순서에 따라 함수가 배치되어 있습니다.
+
+* `app/main.py`: 서비스의 입구입니다. Pydantic 모델을 통해 입력 데이터의 유효성을 검증하고 크롤링 작업을 할당합니다.
+* `app/jobs/korea_university.py`: 실제 크롤링 및 AI 분석 로직이 포함된 핵심 파일입니다.
+* `parse_posts`: 목록 수집 및 날짜 필터링 (중복 수집 방지)
+* `score_notice`: 유저 맞춤형 AI 스코어링
+* `fetch_post_content`: 상세 본문 및 이미지 URL 추출
+* `extract_text_from_image`: Tesseract를 이용한 이미지 내 텍스트 추출(OCR)
+* `run`: 전체 프로세스 총괄 및 최종 Output 생성
+
+
+
+---
+
+## 🛠️ 설치 및 로컬 실행 방법
+
+### 1. 필수 요구사항
+
+* Python 3.10+
+* Tesseract OCR 엔진 (시스템 설치 필요)
+
+### 2. 환경 변수 설정 (`.env`)
+
+프로젝트 루트에 `.env` 파일을 생성하고 다음 정보를 입력하세요.
+
+```env
+GEMINI_API_KEY=your_api_key_here
+PORT=8080
+LOG_LEVEL=INFO
+
 ```
 
-Fields:
-- `url` – set it to the concrete board URL (e.g. `.../notice_under.do`). The router strips the suffix and routes anything under `https://info.korea.ac.kr/info/board/` to the KU job.
-- `user_profile` – raw text describing the candidate (required).
-- `base_url` – optional override. If omitted, the job derives the base from `url`.
-- `recipients` / `boards` – optional overrides; defaults mirror the original Apps Script.
-- Jobs can accept any additional fields; the router forwards the full payload.
-
-### Linkareer job example
-
-```json
-{
-  "url": "https://linkareer.com/list/intern?filterBy_activityTypeID=5&filterBy_categoryIDs=58&filterBy_jobTypes=INTERN&filterBy_regionIDs=2&filterBy_status=OPEN&orderBy_direction=DESC&orderBy_field=RECENT&page=1",
-  "user_profile": "Demo profile for Linkareer: CS student interested in AI/ML internships.",
-  "recipients": [
-    {"name": "고려대 학부생 김수겸", "contact": "01068584123"}
-  ]
-}
-```
-
-Router output:
-
-```json
-{
-  "statusCode": 200,
-  "body": {
-    "source": "linkareer",
-    "count": 20,
-    "aligned": 3,
-    "listings": [
-      {"company": "...", "title": "...", "link": "...", "aligned": true, "reason": "YES"}
-    ],
-    "sent": [
-      {"title": "...", "recipient": "010....", "status": {...}}
-    ]
-  },
-  "script": "linkareer"
-}
-```
-
-The Linkareer job drives headless Chromium via Selenium inside the Lambda container so that dynamic rows load before OpenAI scoring and Kakao delivery.
-
-### Ewha / Sogang examples
-
-- Ewha: set `url` to any page under `https://www.ewha.ac.kr/` (e.g. `https://www.ewha.ac.kr/ewha/news/notice.do`). The router will invoke `ewha_university.run`.
-- Sogang: set `url` to any `https://www.sogang.ac.kr/...` URL to route to `sogang_university.run`.
-
-Both jobs expect the same payload fields (`user_profile`, optional `recipients`) and return `{"count": ...,"aligned": ...,"posts": [...],"sent": [...]}`.
-
-### Firecrawl fallback
-
-If a URL does **not** match any of the explicit routes, the router automatically calls `firecrawl_fallback.run`. It:
-
-1. Uses the Firecrawl API (`FIRECRAWL_API_KEY`) in scrape mode to fetch markdown for the page.
-2. Calls OpenAI to extract posting `{title, link}` pairs from the markdown.
-3. Runs the usual YES/NO profile alignment and Kakao notifications against the extracted posts.
-
-Set `FIRECRAWL_API_KEY` in your environment (defaults to the provided demo key).
-
-```bash
-export FIRECRAWL_API_KEY=fc-...
-```
-
-## Frontend
-
-The project includes a Next.js frontend for easy interaction.
-
-1. Navigate to the `frontend` directory:
-   ```bash
-   cd frontend
-   ```
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-3. Run the development server:
-   ```bash
-   npm run dev
-   ```
-4. Open [http://localhost:3000](http://localhost:3000) in your browser.
-5. Enter your Lambda Function URL (ensure it supports CORS or use the built-in proxy) and configure your crawl request.
-
-## Local testing
+### 3. 라이브러리 설치 및 실행
 
 ```bash
 pip install -r requirements.txt
-export OPENAI_API_KEY=sk-...
-python -m app.jobs.korea_university <<'EOF'
-{"user_profile": "paste corpus text", "url": "https://info.korea.ac.kr/info/board/"}
-EOF
+python app/main.py
+
 ```
+python app/main.py 안되면 path 설정 - 
+(.venv) PS C:\Users\user\crawler-project> 
+$env:PYTHONPATH += ";."
+python app/main.py
+---
 
-For router-level testing:
+## 📡 API 규격 (Interface)
 
-```bash
-python -m app.router <<'EOF'
-{"url": "https://info.korea.ac.kr/info/board/","user_profile":"..."}
-EOF
-```
+### **POST /crawl**
 
-## OpenAI alignment
+사용자의 프로필 정보를 받아 맞춤형 크롤링을 수행합니다.
 
-- Set `OPENAI_API_KEY` in the Lambda environment (or `.env.local` locally).
-- The job asks `gpt-5-nano-2025-08-07` if each notice aligns with the provided profile and expects `YES`/`NO`.
-- A `YES` result both returns the notice in the payload and triggers Kakao notifications.
-- If the API key is missing, alignment is skipped and notices are treated as non-aligned.
+**Request Body 예시:**
 
-## Lambda deployment (container image)
-
-```bash
-docker buildx build --platform linux/amd64 \
-  -t 495599734093.dkr.ecr.ap-northeast-2.amazonaws.com/korea-uni-lambda:latest . --push
-
-aws lambda update-function-code \
-  --function-name korea-uni-crawler \
-  --image-uri 495599734093.dkr.ecr.ap-northeast-2.amazonaws.com/korea-uni-lambda:latest
-```
-
-Set the handler to `app.router.lambda_handler` (default when using this Dockerfile). Keep the Lambda role, timeout (120 s), and memory (1024 MB) as currently configured for Selenium.
-
-## Scheduling
-
-Trigger the router Lambda via EventBridge or any custom integration. Include the JSON payload described above so the router knows which job to run.
-
-.
-
-## Module: Two-Stage Resume Summarization Pipeline
-- In ETF-backend/etf/src/main/java/com/realthon/etf/ai/OpenAiClient.java
-  
-This module explains the two-stage pipeline used to convert a raw resume into (1) a structured analysis and (2) a human-friendly four-line summary.
-The pipeline is built on top of the OpenAI Chat Completions API and is designed for accuracy, consistency, and natural language quality by separating the logic into two clearly defined stages.
-
-## Stage 1: Structured Analysis (JSON Extraction)
-
-Goal:
-Extract factual, resume-based information and organize it into a clean JSON structure.
-
-Characteristics:
-
-Produces strictly formatted JSON (no extra text)
-
-Focuses on factual content only
-
-Avoids speculation or subjective interpretation
-
-Uses temperature = 0.1 to ensure consistency and deterministic output
-
-This stage decides what should be said
-
-Example Output:
-
+```json
 {
-  "summary": "...",
-  "strengths": ["..."],
-  "weaknesses": ["..."],
-  "improvements": ["..."]
+  "userId": "user_12345",
+  "targetUrl": "https://info.korea.ac.kr/info/board/notice_under.do",
+  "userProfile": {
+    "username": "양은서",
+    "major": "컴퓨터공학과",
+    "interestFields": ["AI", "BACKEND"],
+    "intervalDays": 3,
+    "alarmTime": "09:30:00"
+  }
 }
 
-## Stage 2: Natural Four-Line Summary
+```
 
-Goal:
-Convert the Stage 1 JSON into a natural, recruiter-style four-sentence summary.
+**Response Body 예시:**
 
-Characteristics:
+```json
+{
+  "status": "SUCCESS",
+  "relevanceScore": 0.95,
+  "data": {
+    "title": "2026 AI 해커톤 참가자 모집",
+    "summary": "AI 분야 역량을 강화할 수 있는 기회로, 백엔드 개발 경험이 있는 학생을 우대합니다.",
+    "originalUrl": "https://info.korea.ac.kr/...",
+    "timestamp": "2026-01-24T01:18:00Z"
+  }
+}
 
-Turns structured data into smooth, human-readable sentences
+```
 
-Uses a soft tone (e.g., “~ is helpful”, “~ seems strong”)
+---
 
-Each line is exactly one sentence
+## 💡 협업자 가이드 (Note)
 
-Uses temperature = 0.4 for more natural phrasing
+* **비용 효율**: `parse_posts` 함수는 기준 날짜 이전의 글을 발견하면 즉시 루프를 중단하도록 설계되어 불필요한 연산을 방지합니다.
+* **알림 발송**: 이 서비스는 분석 결과만 반환합니다. 실제 카카오톡 발송은 백엔드 서버에서 처리해야 합니다.
+* **OCR**: 이미지 분석 성능을 높이기 위해 `preprocess_for_ocr`에서 전처리를 수행합니다.
 
-This stage decides how it should be said
+---
 
-Required Output Format:
-
-Summary: ~~
-Strengths: ~~
-Weaknesses: ~~
-Areas for Improvement: ~~
-
-## Why Use a Two-Stage Pipeline?
-Stage	Purpose	Benefit
-Stage 1	Extract accurate structured data	Ensures correctness & stability
-Stage 2	Generate natural language	Ensures clarity & readability
-
-Advantages of the two-stage design:
-
-Higher accuracy (structured data first → no hallucinations in summary)
-
-Consistent tone and output format
-
-Easier debugging and modification
-
-Each stage can be improved independently
-
-Predictable and reliable results for production use
-
-## Overall Flow
-[Raw Resume Text]
-        │
-        ▼
-  Stage 1: Analysis → JSON
-        │
-        ▼
-  Stage 2: NLG → Four-line Summary
-        │
-        ▼
-   [Final Output Summary]
