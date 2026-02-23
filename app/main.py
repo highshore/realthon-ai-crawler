@@ -68,10 +68,11 @@ async def handle_crawl(request_data: BatchRequest):
         # [수정 1] event에 넘길 때도 단수가 아니라 복수(targetUrls)로 넘겨야 함
         event = {
             "userId": data_dict["userId"],
-            "targetUrls": data_dict["targetUrls"], # targetUrl -> targetUrls
             "targetUrls": data_dict["targetUrls"],
             "userProfile": data_dict["userProfile"],
-            "callbackUrl": data_dict["callback"]["callbackUrl"]
+            "callbackUrl": data_dict["callback"]["callbackUrl"],
+            "enabled": data_dict["callback"]["enabled"],
+            "authToken": data_dict["callback"]["authToken"]
         }
 
         # [수정 2] 로그 찍을 때도 리스트 전체를 보여주거나 첫 번째 걸 찍어야 함
@@ -88,9 +89,8 @@ async def handle_crawl(request_data: BatchRequest):
             return {"status": "SKIPPED", "message": msg}
 
         # [데이터 전송] 
-        if data_dict["callback"]["enabled"]:
-            actual_notices = result.get("data", [])
-            
+        if data_dict["callback"].get("enabled"): 
+            actual_notices = result.get("data", [])            
             if actual_notices:
                 # 여기서 은서님 서버로 데이터 쏨
                 send_to_callback_list(
