@@ -114,43 +114,51 @@ async def handle_crawl(request_data: BatchRequest):
 
 # --- 엔드포인트 2: 콜백 데이터 저장 ---
 @app.post("/callback/save")
-async def handle_crawler_result(payload: CallbackData): # 규격(CallbackData) 적용됨
+async def handle_crawler_result(payload: CallbackData):
     try:
-        # 🔴 [수정] payload는 이미 객체라서 .body()를 호출하면 안 돼!
-        # 바로 데이터를 꺼내서 쓰면 됨
         user_id = payload.userId
         data_list = payload.data
 
-        print(f"📩 {user_id}번 유저 알림 데이터 {len(data_list)}건 수신")
+        # 1. 현재 이 유저의 기존 공지 URL들을 가져옴 (중복 체크용)
+        existing_res = supabase.table("notifications") \
+            .select("original_url") \
+            .eq("user_id", int(user_id)) \
+            .execute()
+        
+        # 이미 DB에 있는 URL들을 set으로 만듦 (검색 속도 향상)
+        existing_urls = {item['original_url'] for item in existing_res.data}
 
         insert_data = []
         for item in data_list:
-            # 크롤러가 준 날짜(timestamp)를 가져옴, 없으면 현재 시간이라도 넣음
-            notice_date = item.get("timestamp") 
+            target_url = item.get("originalUrl")
+            
+            # 🔥 [핵심] 이미 DB에 있는 URL이라면 스킵!
+            if target_url in existing_urls:
+                continue
 
             insert_data.append({
                 "user_id": int(user_id),
                 "title": item.get("title"),
                 "summary": item.get("summary"),
                 "source_name": item.get("sourceName"),
-                "original_url": item.get("originalUrl"),
+                "original_url": target_url,
                 "category": item.get("category"),
                 "is_liked": True,
-                # 🔴 공지사항 실제 날짜를 created_at 컬럼에 매핑!
-                "created_at": notice_date 
+                "created_at": item.get("timestamp") 
             })
 
         if insert_data:
-            # Supabase 저장 (여기서 진짜 DB에 들어감!)
             supabase.table("notifications").insert(insert_data).execute()
-            print(f"✅ {user_id}번 유저 데이터 {len(insert_data)}건 DB 저장 완료")
+            print(f"✅ {user_id}번 유저 신규 데이터 {len(insert_data)}건 저장 완료")
+        else:
+            print(f"ℹ️ {user_id}번 유저: 새로 추가할 신규 공지가 없습니다.")
 
         return {"status": "SUCCESS"}
         
     except Exception as e:
         print(f"💥 저장 실패: {str(e)}")
         return {"status": "ERROR", "message": str(e)}
-    
+        
 def send_to_callback_list(callback_url: str, notices: List[dict], auth_token: str, user_id: int):
     scores = [float(item.get("relevanceScore", 0.0)) for item in notices]
     top_score = round(max(scores), 2) if scores else 0.0
@@ -268,7 +276,77 @@ def send_kakao(contact: str, template_code: str, template_param: dict[str, str])
         return {"error": "CONNECTION_ERROR", "message": str(e)}
     pass
     
+@app.post("/scheduler/dispatch-crawl")
+async def handle_crawl_dispatch():
+    now = datetime.now()
+    # 30분 단위 스케줄러 비교 (초는 00으로 고정)
+    current_time = now.strftime("%H:%M:00")
+    
+    try:
+        # 1. 지금이 알람 시점인 유저들 찾기
+        user_res = supabase.table("users").select("*").eq("alarm_time", current_time).execute()
+        target_users = user_res.data
 
+        if not target_users:
+            return {"status": "SUCCESS", "message": "이 시간에 예약된 크롤링 작업이 없습니다."}
+
+        processed_count = 0
+
+        for user in target_users:
+            # 2. interval_days 기반 주기 체크
+            # notifications 테이블에서 해당 유저의 가장 최신 공지 생성일 조회
+            last_noti = supabase.table("notifications") \
+                .select("created_at") \
+                .eq("user_id", user["user_id"]) \
+                .order("created_at", desc=True) \
+                .limit(1).execute()
+
+            should_run = False
+            if not last_noti.data:
+                should_run = True # 데이터가 아예 없으면 첫 크롤링 실행
+            else:
+                # DB의 timestamp string을 datetime 객체로 변환
+                last_dt = datetime.fromisoformat(last_noti.data[0]["created_at"].replace('Z', '+00:00'))
+                days_diff = (now.date() - last_dt.date()).days
+                if days_diff >= user["interval_days"]:
+                    should_run = True
+
+            if should_run:
+                # 3. 해당 유저의 모든 target_url 가져오기
+                url_res = supabase.table("target_urls") \
+                    .select("target_url") \
+                    .eq("user_id", user["user_id"]).execute()
+                
+                urls = [item["target_url"] for item in url_res.data]
+                
+                if urls:
+                    # 4. 크롤러(run 함수) 실행을 위한 이벤트 구성
+                    event = {
+                        "userId": user["user_id"],
+                        "targetUrls": urls,
+                        "userProfile": {
+                            "username": user["username"],
+                            "major": user["major"],
+                            "school": user["school"],
+                            # AI가 참고할 정보들
+                            "intervalDays": user["interval_days"]
+                        },
+                        "callbackUrl": f"{os.getenv('BASE_URL')}/callback/save"
+                    }
+                    
+                    # 크롤러 실행!
+                    run(event)
+                    processed_count += 1
+
+        return {
+            "status": "SUCCESS", 
+            "triggered_user_count": processed_count,
+            "time": current_time
+        }
+
+    except Exception as e:
+        LOG.error(f"💥 디스패처 실행 에러: {traceback.format_exc()}")
+        return {"status": "ERROR", "message": str(e)}
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=True)

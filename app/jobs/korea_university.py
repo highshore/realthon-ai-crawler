@@ -225,7 +225,7 @@ def evaluate_posts(profile_text: str, board_name: str, posts: list[dict[str, str
     LOG.info(f"Evaluating posts for board: {board_name} with {len(posts)} posts")
     aligned: list[dict[str, Any]] = []
     evaluated: list[dict[str, Any]] = []
-    THRESHOLD = 0.1
+    THRESHOLD = 0.6
     for post in posts:
         post_copy = dict(post)
         score, rationale = score_notice(profile_text, post_copy["title"], post_copy["link"])
