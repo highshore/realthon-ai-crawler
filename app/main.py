@@ -14,7 +14,7 @@ from typing import List, Optional
 
 # 크롤링 로직 임포트
 from supabase import create_client, Client
-from app.jobs.korea_university import run 
+from app.jobs.korea_university import TIMEZONE, run 
 from typing import Any
 
 # 로깅 설정 (없다면 추가)
@@ -144,7 +144,9 @@ async def handle_crawler_result(payload: CallbackData):
                 "original_url": target_url,
                 "category": item.get("category"),
                 "is_liked": True,
-                "created_at": item.get("timestamp") 
+                "created_at": item.get("timestamp") ,
+                "notice_date": datetime.now(TIMEZONE).isoformat(), # 전송/수집일 (오늘)
+                "is_sent": False,
             })
 
         if insert_data:
@@ -293,21 +295,26 @@ async def handle_crawl_dispatch():
         processed_count = 0
 
         for user in target_users:
-            # 2. interval_days 기반 주기 체크
-            # notifications 테이블에서 해당 유저의 가장 최신 공지 생성일 조회
+            # 2. 주기 체크 (notice_date 기준!)
+            # 우리가 마지막으로 전송/수집을 완료한 시점을 확인해
             last_noti = supabase.table("notifications") \
-                .select("created_at") \
+                .select("notice_date") \
                 .eq("user_id", user["user_id"]) \
-                .order("created_at", desc=True) \
+                .order("notice_date", desc=True) \
                 .limit(1).execute()
 
             should_run = False
             if not last_noti.data:
-                should_run = True # 데이터가 아예 없으면 첫 크롤링 실행
+                should_run = True # 기록이 없으면 첫 실행
             else:
-                # DB의 timestamp string을 datetime 객체로 변환
-                last_dt = datetime.fromisoformat(last_noti.data[0]["created_at"].replace('Z', '+00:00'))
+                # notice_date(전송일)를 가져와서 오늘과 비교
+                last_notice_str = last_noti.data[0]["notice_date"]
+                # 문자열 날짜를 datetime으로 변환 (ISO 포맷 대응)
+                last_dt = datetime.fromisoformat(last_notice_str.replace('Z', '+00:00'))
+                
                 days_diff = (now.date() - last_dt.date()).days
+                
+                # 유저가 설정한 interval_days만큼 지났는지 체크
                 if days_diff >= user["interval_days"]:
                     should_run = True
 
@@ -320,7 +327,10 @@ async def handle_crawl_dispatch():
                 urls = [item["target_url"] for item in url_res.data]
                 
                 if urls:
-                    # 4. 크롤러(run 함수) 실행을 위한 이벤트 구성
+                    # 4. 크롤러(run 함수) 실행
+                    # intervalDays는 지난 전송일로부터 오늘까지의 차이만큼 긁어오도록 설정
+                    fetch_days = days_diff if not should_run else user["interval_days"]
+                    
                     event = {
                         "userId": user["user_id"],
                         "targetUrls": urls,
@@ -328,8 +338,7 @@ async def handle_crawl_dispatch():
                             "username": user["username"],
                             "major": user["major"],
                             "school": user["school"],
-                            # AI가 참고할 정보들
-                            "intervalDays": user["interval_days"]
+                            "intervalDays": fetch_days 
                         },
                         "callbackUrl": f"{os.getenv('BASE_URL')}/callback/save"
                     }
@@ -347,6 +356,7 @@ async def handle_crawl_dispatch():
     except Exception as e:
         LOG.error(f"💥 디스패처 실행 에러: {traceback.format_exc()}")
         return {"status": "ERROR", "message": str(e)}
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=True)
