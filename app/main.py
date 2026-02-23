@@ -49,7 +49,7 @@ class UserProfile(BaseModel):
     username: str
     phoneNumber: str
 class CallbackConfig(BaseModel):
-    enabled: bool         # 👈 추가
+    enabled: bool = True         # 👈 추가
     callbackUrl: str      # 👈 추가
     authToken: str
 class BatchRequest(BaseModel):
@@ -63,16 +63,16 @@ class BatchRequest(BaseModel):
 @app.post("/crawl/request")
 async def handle_crawl(request_data: BatchRequest):
     try:
+        # Pydantic 모델을 딕셔너리로 변환
         data_dict = request_data.model_dump()
         
-        # [수정 1] event에 넘길 때도 단수가 아니라 복수(targetUrls)로 넘겨야 함
+        # 🔴 [주의] 여기서 data_dict["callback"]은 CallbackConfig의 내용을 담은 dict임
         event = {
             "userId": data_dict["userId"],
             "targetUrls": data_dict["targetUrls"],
             "userProfile": data_dict["userProfile"],
-            "callbackUrl": data_dict["callback"]["callbackUrl"],
-            "enabled": data_dict["callback"]["enabled"],
-            "authToken": data_dict["callback"]["authToken"]
+            # 이제 KeyError 없이 잘 읽힐 거야!
+            "callbackUrl": data_dict["callback"]["callbackUrl"] 
         }
 
         # [수정 2] 로그 찍을 때도 리스트 전체를 보여주거나 첫 번째 걸 찍어야 함
