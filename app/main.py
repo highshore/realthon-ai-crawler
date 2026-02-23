@@ -15,8 +15,20 @@ from typing import List, Optional
 # 크롤링 로직 임포트
 from supabase import create_client, Client
 from app.jobs.korea_university import run 
+from typing import Any
+
+# 로깅 설정 (없다면 추가)
+LOG = logging.getLogger(__name__)
+# 세션 설정 (없다면 추가, 성능을 위해 세션을 재사용하는 게 좋아)
+session = requests.Session()
+
+# 타임아웃 설정 (초 단위)
+HTTP_TIMEOUT = 10
 
 # [필수] Supabase 설정 (환경변수에서 읽기)
+SENDER_KEY = os.getenv("KAKAO_SENDER_KEY")
+SECRET_KEY = os.getenv("KAKAO_SECRET_KEY")
+APP_KEY = os.getenv("KAKAO_APP_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -40,10 +52,8 @@ class CallbackConfig(BaseModel):
     authToken: str
 
 class BatchRequest(BaseModel):
-    userId: str
     targetUrls: List[str]  # targetUrl(str)에서 targetUrls(List[str])로 변경!
     userId: int
-    targetUrls: List[str]
     userProfile: UserProfile
     summary: str
     callback: CallbackConfig
@@ -140,6 +150,7 @@ async def handle_crawler_result(payload: CallbackData): # 규격(CallbackData) �
     except Exception as e:
         print(f"💥 저장 실패: {str(e)}")
         return {"status": "ERROR", "message": str(e)}
+    
 def send_to_callback_list(callback_url: str, notices: List[dict], auth_token: str, user_id: int):
     scores = [float(item.get("relevanceScore", 0.0)) for item in notices]
     top_score = round(max(scores), 2) if scores else 0.0
@@ -170,45 +181,102 @@ def send_to_callback_list(callback_url: str, notices: List[dict], auth_token: st
         print(f"📡 콜백 전송 완료 (상태코드: {response.status_code})")
     except Exception as e:
         print(f"❌ 콜백 전송 실패: {e}")
+@app.post("/scheduler/send-notifications")
+async def handle_notification_scheduler():
+    now = datetime.now()
+    # 30분 단위 스케줄러이므로 초는 00으로 고정해서 비교
+    current_time = now.strftime("%H:%M:00") 
+    
+    try:
+        # 1. 지금 알림이 필요한 유저들만 조회
+        user_res = supabase.table("users").select("*").eq("alarm_time", current_time).execute()
+        target_users = user_res.data
 
+        if not target_users:
+            return {"status": "SUCCESS", "message": "이 시간에 예약된 유저가 없습니다."}
+
+        sent_count = 0
+        for user in target_users:
+            # 2. 주기(interval) 체크 (오늘 보낼 날인가?)
+            last_sent = user.get("last_sent_at")
+            interval = user.get("interval_days", 1)
+            if last_sent:
+                last_sent_dt = datetime.fromisoformat(last_sent.replace('Z', '+00:00'))
+                if (now.date() - last_sent_dt.date()).days < interval:
+                    continue
+
+            # 3. 이 유저에게 쌓인 새로운 공지들 추출
+            noti_res = supabase.table("notifications") \
+                .select("*") \
+                .eq("user_id", user["user_id"]) \
+                .eq("is_sent", False).execute()
+            
+            notis = noti_res.data
+            if not notis: continue
+
+            # 4. 카톡 전송 데이터 준비 (정보 갈아끼우기)
+            # 템플릿 변수(user_name, content 등)는 NHN 콘솔 설정과 맞춰야 해!
+            params = {
+                "user_name": user['username'],
+                "content": f"{user['username']}님, {len(notis)}개의 맞춤 공지가 도착했습니다!",
+                "link": "https://allyeojujob.com/my-notices" # 유저가 누를 링크
+            }
+
+            # 5. 실제 발송
+            # 전화번호 하이픈 제거 필수
+            clean_phone = user['phone_number'].replace("-", "")
+            api_resp = send_kakao(clean_phone, "YOUR_TEMPLATE_CODE", params)
+
+            # 6. 뒷정리 (기록 업데이트)
+            if "error" not in api_resp:
+                # 보낸 공지들은 체크 완료
+                supabase.table("notifications").update({"is_sent": True}).eq("user_id", user["user_id"]).eq("is_sent", False).execute()
+                # 마지막 전송일 업데이트
+                supabase.table("users").update({"last_sent_at": now.isoformat()}).eq("user_id", user["user_id"]).execute()
+                sent_count += 1
+
+        return {"status": "SUCCESS", "total_sent": sent_count}
+
+    except Exception as e:
+        LOG.error(f"💥 스케줄러 실행 에러: {e}")
+        return {"status": "ERROR", "message": str(e)}
+    
+
+def send_kakao(contact: str, template_code: str, template_param: dict[str, str]) -> dict[str, Any]:
+    # 🔴 주의: SENDER_KEY, SECRET_KEY, APP_KEY는 os.getenv 등으로 가져온 상태여야 함!
+    payload = {
+        "senderKey": SENDER_KEY,
+        "templateCode": template_code,
+        "recipientList": [{"recipientNo": contact, "templateParameter": template_param}],
+    }
+    
+    headers = {
+        "X-Secret-Key": SECRET_KEY, 
+        "Content-Type": "application/json;charset=UTF-8"
+    }
+    
+    url = f"https://api-alimtalk.cloud.toast.com/alimtalk/v2.2/appkeys/{APP_KEY}/messages"
+    
+    try:
+        # POST 요청 전송
+        resp = session.post(url, json=payload, headers=headers, timeout=HTTP_TIMEOUT)
+        
+        # 로그 기록
+        LOG.info(f"Kakao API 응답 상태: {resp.status_code}")
+        
+        if resp.status_code != 200:
+            LOG.error(f"Kakao send failed ({resp.status_code}) {resp.text}")
+            return {"error": "API_STATUS_ERROR", "status": resp.status_code, "detail": resp.text}
+            
+        # 정상 응답 반환
+        return resp.json()
+        
+    except Exception as e:
+        LOG.error(f"Kakao connection error: {e}")
+        return {"error": "CONNECTION_ERROR", "message": str(e)}
+    pass
+    
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    uvicorn.run("app.main:app", host="0.0.0.0", port=port)
     uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=True)
-
-
-@app.post("/send-kakao")
-async def send_daily_alarms():
-    try:
-        now = datetime.now()
-        current_time = now.strftime("%H:%M:00") # 예: "09:00:00"
-
-        # 1. 지금 시간이 alarm_time인 유저들 가져오기
-        res = supabase.table("users").select("*").eq("alarm_time", current_time).execute()
-        target_users = res.data
-
-        for user in target_users:
-            # 2. interval_days 체크 (예: 1일 주기면 매일, 3일 주기면 마지막 전송일 확인)
-            # 여기서는 단순화를 위해 매일 전송으로 예시를 들게!
-            
-            # 3. notifications 테이블에서 아직 안 보낸 최신 알림 가져오기
-            notis = supabase.table("notifications") \
-                .select("*") \
-                .eq("user_id", user["user_id"]) \
-                .eq("is_sent", False) \
-                .execute()
-
-            if notis.data:
-                # 4. 카카오톡 메시지 구성 및 전송 (API 호출)
-                # kakao_api.send(user["phone_number"], notis.data)
-                
-                # 5. 보냈다고 표시
-                supabase.table("notifications") \
-                    .update({"is_sent": True}) \
-                    .eq("user_id", user["user_id"]) \
-                    .execute()
-
-        return {"status": "SUCCESS", "processed_users": len(target_users)}
-    except Exception as e:
-        return {"status": "ERROR", "message": str(e)}
