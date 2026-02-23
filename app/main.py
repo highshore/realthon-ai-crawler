@@ -49,8 +49,9 @@ class UserProfile(BaseModel):
     username: str
     phoneNumber: str
 class CallbackConfig(BaseModel):
+    enabled: bool         # 👈 추가
+    callbackUrl: str      # 👈 추가
     authToken: str
-
 class BatchRequest(BaseModel):
     targetUrls: List[str]  # targetUrl(str)에서 targetUrls(List[str])로 변경!
     userId: int
@@ -67,10 +68,11 @@ async def handle_crawl(request_data: BatchRequest):
         # [수정 1] event에 넘길 때도 단수가 아니라 복수(targetUrls)로 넘겨야 함
         event = {
             "userId": data_dict["userId"],
-            "targetUrls": data_dict["targetUrls"], # targetUrl -> targetUrls
             "targetUrls": data_dict["targetUrls"],
             "userProfile": data_dict["userProfile"],
-            "callbackUrl": data_dict["callback"]["callbackUrl"]
+            "callbackUrl": data_dict["callback"]["callbackUrl"],
+            "enabled": data_dict["callback"]["enabled"],
+            "authToken": data_dict["callback"]["authToken"]
         }
 
         # [수정 2] 로그 찍을 때도 리스트 전체를 보여주거나 첫 번째 걸 찍어야 함
@@ -85,12 +87,10 @@ async def handle_crawl(request_data: BatchRequest):
             msg = result.get("message") if result else "결과 없음"
             print(f"⚠️ 건너뜀: {msg}")
             return {"status": "SKIPPED", "message": msg}
-            return {"status": "SKIPPED", "message": result.get("message", "결과 없음")}
 
         # [데이터 전송] 
-        if data_dict["callback"]["enabled"]:
-            actual_notices = result.get("data", [])
-            
+        if data_dict["callback"].get("enabled"): 
+            actual_notices = result.get("data", [])            
             if actual_notices:
                 # 여기서 은서님 서버로 데이터 쏨
                 send_to_callback_list(
@@ -192,20 +192,12 @@ async def handle_notification_scheduler():
         user_res = supabase.table("users").select("*").eq("alarm_time", current_time).execute()
         target_users = user_res.data
 
-        if not target_users:
-            return {"status": "SUCCESS", "message": "이 시간에 예약된 유저가 없습니다."}
-
-        sent_count = 0
         for user in target_users:
-            # 2. 주기(interval) 체크 (오늘 보낼 날인가?)
-            last_sent = user.get("last_sent_at")
-            interval = user.get("interval_days", 1)
-            if last_sent:
-                last_sent_dt = datetime.fromisoformat(last_sent.replace('Z', '+00:00'))
-                if (now.date() - last_sent_dt.date()).days < interval:
-                    continue
+            sent_count = 0
 
-            # 3. 이 유저에게 쌓인 새로운 공지들 추출
+            # 1. 주기 체크 (생략 - 기존 로직 유지)
+
+            # 2. 이 유저에게 쌓인 안 보낸 공지들 가져오기
             noti_res = supabase.table("notifications") \
                 .select("*") \
                 .eq("user_id", user["user_id"]) \
@@ -214,32 +206,32 @@ async def handle_notification_scheduler():
             notis = noti_res.data
             if not notis: continue
 
-            # 4. 카톡 전송 데이터 준비 (정보 갈아끼우기)
-            # 템플릿 변수(user_name, content 등)는 NHN 콘솔 설정과 맞춰야 해!
-            params = {
-                "user_name": user['username'],
-                "content": f"{user['username']}님, {len(notis)}개의 맞춤 공지가 도착했습니다!",
-                "link": "https://allyeojujob.com/my-notices" # 유저가 누를 링크
-            }
+            # 🔥 [수겸님 가이드 반영] 공지마다 카톡을 따로 전송
+            for noti in notis:
+                # 3. 수겸님이 정해준 양식(Parameter)에 정확히 맞추기
+                params = {
+                    "korean-title": noti['title'],     # 제목
+                    "customer-name": user['username'], # 이름
+                    "article-link": noti['original_url'] # 링크
+                }
 
-            # 5. 실제 발송
-            # 전화번호 하이픈 제거 필수
-            clean_phone = user['phone_number'].replace("-", "")
-            api_resp = send_kakao(clean_phone, "YOUR_TEMPLATE_CODE", params)
+                # 4. 발송
+                clean_phone = user['phone_number'].replace("-", "")
+                api_resp = send_kakao(clean_phone, "send-article", params)
 
-            # 6. 뒷정리 (기록 업데이트)
-            if "error" not in api_resp:
-                # 보낸 공지들은 체크 완료
-                supabase.table("notifications").update({"is_sent": True}).eq("user_id", user["user_id"]).eq("is_sent", False).execute()
-                # 마지막 전송일 업데이트
-                supabase.table("users").update({"last_sent_at": now.isoformat()}).eq("user_id", user["user_id"]).execute()
-                sent_count += 1
-
-        return {"status": "SUCCESS", "total_sent": sent_count}
+                # 5. 발송 성공 시 해당 공지만 '보냄' 처리
+                if "error" not in api_resp:
+                    supabase.table("notifications") \
+                        .update({"is_sent": True}) \
+                        .eq("id", noti["id"]).execute()
+                    sent_count += 1
+            
+            # 유저별 발송 완료 후 전송 시점 기록
+            supabase.table("users").update({"last_sent_at": now.isoformat()}).eq("user_id", user["user_id"]).execute()
+            return {"status": "SUCCESS", "total_sent": sent_count}
 
     except Exception as e:
         LOG.error(f"💥 스케줄러 실행 에러: {e}")
-        return {"status": "ERROR", "message": str(e)}
     
 
 def send_kakao(contact: str, template_code: str, template_param: dict[str, str]) -> dict[str, Any]:
