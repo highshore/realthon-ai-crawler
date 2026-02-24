@@ -282,38 +282,39 @@ def send_kakao(contact: str, template_code: str, template_param: dict[str, str])
 @app.post("/scheduler/dispatch-crawl")
 async def handle_crawl_dispatch():
     try:
-        # 1. 모든 유저 가져오기 (알람 시간 필터 없음 - 연오가 잘 수정함! 👍)
+        # 1. 모든 유저 조회
         user_res = supabase.table("users").select("*").execute() 
         target_users = user_res.data
+        LOG.info(f"🚀 크롤링 디스패처 시작 - 조회된 총 유저 수: {len(target_users)}")
 
-        processed_count = 0
+        if not target_users:
+            return {"status": "SUCCESS", "message": "조회된 유저가 없습니다."}
+
+        processed_count = 0 # 👈 변수 초기화 추가
+
         for user in target_users:
-            # 2. 주기 체크 로직을 아예 삭제하거나, 
-            # 단순히 '얼마나 과거까지 긁어올지' 결정하는 용도로만 사용
-            
-            # 3. 유저의 URL들 가져오기
-            url_res = supabase.table("target_urls") \
-                .select("target_url") \
-                .eq("user_id", user["user_id"]).execute()
+            # 2. 해당 유저의 타겟 URL들 가져오기
+            url_res = supabase.table("target_urls").select("target_url").eq("user_id", user["user_id"]).execute()
             urls = [item["target_url"] for item in url_res.data]
             
             if urls:
-                # 🔥 'should_run' 조건 없이 무조건 실행!
-                # 매일매일 새로운 공지가 있으면 창고(notifications)에 넣기 위함
-                event = {
+                # 3. 크롤러 출동 (이벤트 구성)
+                crawl_event = {
                     "userId": user["user_id"],
                     "targetUrls": urls,
                     "userProfile": {
-                        "username": user["username"],
-                        "major": user["major"],
-                        "school": user["school"],
-                        # AI에게는 안전하게 유저가 설정한 주기만큼의 범위를 보게 함
-                        "intervalDays": user["interval_days"] 
+                        "username": user.get("username"),
+                        "major": user.get("major"),
+                        "school": user.get("school"),
+                        "intervalDays": user.get("interval_days", 7) # 기본값 설정
                     },
                     "callbackUrl": f"{os.getenv('BASE_URL')}/callback/save"
                 }
-                run(event)
+                
+                # 4. 크롤러 실행 (한 번만!)
+                run(crawl_event)
                 processed_count += 1
+                LOG.info(f"✅ {user.get('username')}님 크롤링 요청 완료")
 
         return {"status": "SUCCESS", "crawled_user_count": processed_count}
 
