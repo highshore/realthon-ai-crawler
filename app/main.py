@@ -1,5 +1,5 @@
 import os
-from fastapi import BackgroundTasks # 👈 상단에 추가
+#from fastapi import BackgroundTasks # 👈 상단에 추가
 import requests
 import uvicorn
 import json
@@ -16,6 +16,8 @@ from typing import List, Optional
 from supabase import create_client, Client
 from app.jobs.korea_university import TIMEZONE, run 
 from typing import Any
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 # 로깅 설정 (없다면 추가)
 LOG = logging.getLogger(__name__)
@@ -71,7 +73,6 @@ async def handle_crawl(request_data: BatchRequest):
             "userId": data_dict["userId"],
             "targetUrls": data_dict["targetUrls"],
             "userProfile": data_dict["userProfile"],
-            # 이제 KeyError 없이 잘 읽힐 거야!
             "callbackUrl": data_dict["callback"]["callbackUrl"] 
         }
 
@@ -293,6 +294,7 @@ async def handle_crawl_dispatch(): # BackgroundTasks 제거
             urls = [item["target_url"] for item in url_res.data]
             
             if urls:
+                # handle_crawl_dispatch 함수 내부 루프 안쪽
                 crawl_event = {
                     "userId": user["user_id"],
                     "targetUrls": urls,
@@ -302,12 +304,14 @@ async def handle_crawl_dispatch(): # BackgroundTasks 제거
                         "school": user.get("school"),
                         "intervalDays": user.get("interval_days", 7)
                     },
-                    "callbackUrl": f"{os.getenv('BASE_URL').rstrip('/')}/callback/save" # rstrip 추가로 슬래시 방지
+                    "callbackUrl": f"{os.getenv('BASE_URL').rstrip('/')}/callback/save"
                 }
-                
-                # 🔥 await를 써서 크롤링이 끝날 때까지 기다립니다.
-                # 만약 run이 동기 함수라면 그냥 run(crawl_event)
-                run(crawl_event) 
+
+                # 보낼 주소 로그를 명확히 찍어
+                LOG.info(f"📡 [DISPATCH] {user.get('username')}님 크롤링 시작 요청")
+                LOG.info(f"🔗 [DISPATCH] Callback URL 확인: {crawl_event['callbackUrl']}")
+
+                run(crawl_event)
                 processed_count += 1
                 LOG.info(f"✅ {user.get('username')}님 크롤링 및 저장 프로세스 완료")
 
@@ -316,6 +320,18 @@ async def handle_crawl_dispatch(): # BackgroundTasks 제거
     except Exception as e:
         LOG.error(f"💥 디스패처 에러: {traceback.format_exc()}")
         return {"status": "ERROR", "message": str(e)}
+    
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    body = await request.body()
+    # 어떤 필드 형식이 틀렸는지, 실제로 들어온 JSON이 뭔지 상세히 출력해
+    LOG.error(f"❌ [422 Error] 유효성 검사 실패: {exc.errors()}")
+    LOG.error(f"❌ [422 Error] 들어온 데이터 원본: {body.decode()}")
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors(), "body": body.decode()},
+    )
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=True)
