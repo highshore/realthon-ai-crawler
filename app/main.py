@@ -195,11 +195,12 @@ def send_to_callback_list(callback_url: str, notices: List[dict], auth_token: st
 async def handle_notification_scheduler():
     now = datetime.now()
     # 30분 단위 스케줄러이므로 초는 00으로 고정해서 비교
-    current_time = now.strftime("%H:%M:00") 
-    
+    current_time_min = now.strftime("%H:%M") 
+    search_time = f"{current_time_min}:00"
+    LOG.info(f"⏰ 스케줄러 작동 중... (조회 시간: {search_time})")
     try:
         # 1. 지금 알림이 필요한 유저들만 조회
-        user_res = supabase.table("users").select("*").eq("alarm_time", current_time).execute()
+        user_res = supabase.table("users").select("*").eq("alarm_time", search_time).execute()
         target_users = user_res.data
 
         for user in target_users:
