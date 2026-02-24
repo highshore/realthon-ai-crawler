@@ -281,78 +281,41 @@ def send_kakao(contact: str, template_code: str, template_param: dict[str, str])
     
 @app.post("/scheduler/dispatch-crawl")
 async def handle_crawl_dispatch():
-    now = datetime.now()
-    # 30분 단위 스케줄러 비교 (초는 00으로 고정)
-    current_time = now.strftime("%H:%M:00")
-    
     try:
-        # 1. 지금이 알람 시점인 유저들 찾기
-        user_res = supabase.table("users").select("*").eq("alarm_time", current_time).execute()
+        # 1. 모든 유저 가져오기 (알람 시간 필터 없음 - 연오가 잘 수정함! 👍)
+        user_res = supabase.table("users").select("*").execute() 
         target_users = user_res.data
 
-        if not target_users:
-            return {"status": "SUCCESS", "message": "이 시간에 예약된 크롤링 작업이 없습니다."}
-
         processed_count = 0
-
         for user in target_users:
-            # 2. 주기 체크 (notice_date 기준!)
-            # 우리가 마지막으로 전송/수집을 완료한 시점을 확인해
-            last_noti = supabase.table("notifications") \
-                .select("notice_date") \
-                .eq("user_id", user["user_id"]) \
-                .order("notice_date", desc=True) \
-                .limit(1).execute()
+            # 2. 주기 체크 로직을 아예 삭제하거나, 
+            # 단순히 '얼마나 과거까지 긁어올지' 결정하는 용도로만 사용
+            
+            # 3. 유저의 URL들 가져오기
+            url_res = supabase.table("target_urls") \
+                .select("target_url") \
+                .eq("user_id", user["user_id"]).execute()
+            urls = [item["target_url"] for item in url_res.data]
+            
+            if urls:
+                # 🔥 'should_run' 조건 없이 무조건 실행!
+                # 매일매일 새로운 공지가 있으면 창고(notifications)에 넣기 위함
+                event = {
+                    "userId": user["user_id"],
+                    "targetUrls": urls,
+                    "userProfile": {
+                        "username": user["username"],
+                        "major": user["major"],
+                        "school": user["school"],
+                        # AI에게는 안전하게 유저가 설정한 주기만큼의 범위를 보게 함
+                        "intervalDays": user["interval_days"] 
+                    },
+                    "callbackUrl": f"{os.getenv('BASE_URL')}/callback/save"
+                }
+                run(event)
+                processed_count += 1
 
-            should_run = False
-            if not last_noti.data:
-                should_run = True # 기록이 없으면 첫 실행
-            else:
-                # notice_date(전송일)를 가져와서 오늘과 비교
-                last_notice_str = last_noti.data[0]["notice_date"]
-                # 문자열 날짜를 datetime으로 변환 (ISO 포맷 대응)
-                last_dt = datetime.fromisoformat(last_notice_str.replace('Z', '+00:00'))
-                
-                days_diff = (now.date() - last_dt.date()).days
-                
-                # 유저가 설정한 interval_days만큼 지났는지 체크
-                if days_diff >= user["interval_days"]:
-                    should_run = True
-
-            if should_run:
-                # 3. 해당 유저의 모든 target_url 가져오기
-                url_res = supabase.table("target_urls") \
-                    .select("target_url") \
-                    .eq("user_id", user["user_id"]).execute()
-                
-                urls = [item["target_url"] for item in url_res.data]
-                
-                if urls:
-                    # 4. 크롤러(run 함수) 실행
-                    # intervalDays는 지난 전송일로부터 오늘까지의 차이만큼 긁어오도록 설정
-                    fetch_days = days_diff if not should_run else user["interval_days"]
-                    
-                    event = {
-                        "userId": user["user_id"],
-                        "targetUrls": urls,
-                        "userProfile": {
-                            "username": user["username"],
-                            "major": user["major"],
-                            "school": user["school"],
-                            "intervalDays": fetch_days 
-                        },
-                        "callbackUrl": f"{os.getenv('BASE_URL')}/callback/save"
-                    }
-                    
-                    # 크롤러 실행!
-                    run(event)
-                    processed_count += 1
-
-        return {
-            "status": "SUCCESS", 
-            "triggered_user_count": processed_count,
-            "time": current_time
-        }
+        return {"status": "SUCCESS", "crawled_user_count": processed_count}
 
     except Exception as e:
         LOG.error(f"💥 디스패처 실행 에러: {traceback.format_exc()}")
