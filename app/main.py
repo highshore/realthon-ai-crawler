@@ -1,5 +1,5 @@
 import os
-
+from fastapi import BackgroundTasks # 👈 상단에 추가
 import requests
 import uvicorn
 import json
@@ -281,25 +281,17 @@ def send_kakao(contact: str, template_code: str, template_param: dict[str, str])
     pass
     
 @app.post("/scheduler/dispatch-crawl")
-async def handle_crawl_dispatch():
+async def handle_crawl_dispatch(background_tasks: BackgroundTasks): # 👈 파라미터 추가
     try:
-        # 1. 모든 유저 조회
         user_res = supabase.table("users").select("*").execute() 
         target_users = user_res.data
-        LOG.info(f"🚀 크롤링 디스패처 시작 - 조회된 총 유저 수: {len(target_users)}")
-
-        if not target_users:
-            return {"status": "SUCCESS", "message": "조회된 유저가 없습니다."}
-
-        processed_count = 0 # 👈 변수 초기화 추가
-
+        
+        processed_count = 0
         for user in target_users:
-            # 2. 해당 유저의 타겟 URL들 가져오기
             url_res = supabase.table("target_urls").select("target_url").eq("user_id", user["user_id"]).execute()
             urls = [item["target_url"] for item in url_res.data]
             
             if urls:
-                # 3. 크롤러 출동 (이벤트 구성)
                 crawl_event = {
                     "userId": user["user_id"],
                     "targetUrls": urls,
@@ -307,24 +299,22 @@ async def handle_crawl_dispatch():
                         "username": user.get("username"),
                         "major": user.get("major"),
                         "school": user.get("school"),
-                        "intervalDays": user.get("interval_days", 7) # 기본값 설정
+                        "intervalDays": user.get("interval_days", 7)
                     },
                     "callbackUrl": f"{os.getenv('BASE_URL')}/callback/save"
                 }
                 
-                LOG.info(f"os.getenv('BASE_URL'): {os.getenv('BASE_URL')}")
-                
-                # 4. 크롤러 실행 (한 번만!)
-                run(crawl_event)
+                # 🔥 핵심: run을 직접 실행하지 않고 백그라운드 태스크로 등록!
+                background_tasks.add_task(run, crawl_event)
                 processed_count += 1
-                LOG.info(f"✅ {user.get('username')}님 크롤링 요청 완료")
+                LOG.info(f"🚚 {user.get('username')}님 작업을 백그라운드에 등록했습니다.")
 
-        return {"status": "SUCCESS", "crawled_user_count": processed_count}
+        # 이제 스케줄러에게 1초 만에 "성공" 응답을 보냅니다.
+        return {"status": "SUCCESS", "message": f"{processed_count}명의 작업을 시작했습니다."}
 
     except Exception as e:
-        LOG.error(f"💥 디스패처 실행 에러: {traceback.format_exc()}")
+        LOG.error(f"💥 디스패처 에러: {traceback.format_exc()}")
         return {"status": "ERROR", "message": str(e)}
-
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     uvicorn.run("app.main:app", host="0.0.0.0", port=port, reload=True)
