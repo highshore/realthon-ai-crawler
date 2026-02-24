@@ -43,7 +43,7 @@ app = FastAPI()
 
 # --- 모델 정의 (생략 없이 유지) ---
 class CallbackData(BaseModel):
-    userId: str
+    userId: int
     data: List[dict]
 class UserProfile(BaseModel):
     username: str
