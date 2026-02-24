@@ -281,11 +281,12 @@ def send_kakao(contact: str, template_code: str, template_param: dict[str, str])
     pass
     
 @app.post("/scheduler/dispatch-crawl")
-async def handle_crawl_dispatch(background_tasks: BackgroundTasks): # 👈 파라미터 추가
+async def handle_crawl_dispatch(): # BackgroundTasks 제거
     try:
         user_res = supabase.table("users").select("*").execute() 
         target_users = user_res.data
-        
+        LOG.info(f"🚀 디스패처 시작 - 대상 유저: {len(target_users)}명")
+
         processed_count = 0
         for user in target_users:
             url_res = supabase.table("target_urls").select("target_url").eq("user_id", user["user_id"]).execute()
@@ -301,16 +302,16 @@ async def handle_crawl_dispatch(background_tasks: BackgroundTasks): # 👈 파�
                         "school": user.get("school"),
                         "intervalDays": user.get("interval_days", 7)
                     },
-                    "callbackUrl": f"{os.getenv('BASE_URL')}/callback/save"
+                    "callbackUrl": f"{os.getenv('BASE_URL').rstrip('/')}/callback/save" # rstrip 추가로 슬래시 방지
                 }
                 
-                # 🔥 핵심: run을 직접 실행하지 않고 백그라운드 태스크로 등록!
-                background_tasks.add_task(run, crawl_event)
+                # 🔥 await를 써서 크롤링이 끝날 때까지 기다립니다.
+                # 만약 run이 동기 함수라면 그냥 run(crawl_event)
+                run(crawl_event) 
                 processed_count += 1
-                LOG.info(f"🚚 {user.get('username')}님 작업을 백그라운드에 등록했습니다.")
+                LOG.info(f"✅ {user.get('username')}님 크롤링 및 저장 프로세스 완료")
 
-        # 이제 스케줄러에게 1초 만에 "성공" 응답을 보냅니다.
-        return {"status": "SUCCESS", "message": f"{processed_count}명의 작업을 시작했습니다."}
+        return {"status": "SUCCESS", "message": f"{processed_count}명의 처리를 완료했습니다."}
 
     except Exception as e:
         LOG.error(f"💥 디스패처 에러: {traceback.format_exc()}")
