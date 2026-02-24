@@ -115,6 +115,7 @@ async def handle_crawl(request_data: BatchRequest):
 # --- 엔드포인트 2: 콜백 데이터 저장 ---
 @app.post("/callback/save")
 async def handle_crawler_result(payload: CallbackData):
+    print(f"📥 [SAVE] 콜백 수신 성공! 데이터 개수: {len(payload.data)}")
     try:
         user_id = payload.userId
         data_list = payload.data
