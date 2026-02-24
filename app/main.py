@@ -311,6 +311,8 @@ async def handle_crawl_dispatch():
                     "callbackUrl": f"{os.getenv('BASE_URL')}/callback/save"
                 }
                 
+                print(f"os.getenv('BASE_URL'): {os.getenv('BASE_URL')}")
+                
                 # 4. 크롤러 실행 (한 번만!)
                 run(crawl_event)
                 processed_count += 1
