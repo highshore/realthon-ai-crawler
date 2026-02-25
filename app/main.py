@@ -7,7 +7,7 @@ from fastapi import FastAPI
 import logging
 import traceback
 from datetime import datetime, timedelta
-
+from typing import Any # 상단에 추가되어 있는지 확인
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -15,7 +15,6 @@ from typing import List, Optional
 # 크롤링 로직 임포트
 from supabase import create_client, Client
 from app.jobs.korea_university import TIMEZONE, run 
-from typing import Any
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
@@ -45,7 +44,7 @@ app = FastAPI()
 
 # --- 모델 정의 (생략 없이 유지) ---
 class CallbackData(BaseModel):
-    userId: int
+    userId: Any
     data: List[dict]
 class UserProfile(BaseModel):
     username: str
@@ -311,8 +310,17 @@ async def handle_crawl_dispatch(): # BackgroundTasks 제거
                 LOG.info(f"📡 [DISPATCH] {user.get('username')}님 크롤링 시작 요청")
                 LOG.info(f"🔗 [DISPATCH] Callback URL 확인: {crawl_event['callbackUrl']}")
 
-                run(crawl_event)
+                result = run(crawl_event)
                 processed_count += 1
+                if result.get("status") == "SUCCESS" and result.get("data"):
+        # 아까 정의해둔 콜백 전송 함수를 여기서 써야 해!
+                    send_to_callback_list(
+                        callback_url=crawl_event["callbackUrl"],
+                        notices=result["data"],
+                        auth_token="X-AI-CALLBACK-TOKEN", # 필요한 경우
+                        user_id=user["user_id"]
+                    )
+                    LOG.info(f"✅ {user.get('username')}님 데이터를 저장소로 전송했습니다.")
                 LOG.info(f"✅ {user.get('username')}님 크롤링 및 저장 프로세스 완료")
 
         return {"status": "SUCCESS", "message": f"{processed_count}명의 처리를 완료했습니다."}
