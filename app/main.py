@@ -195,19 +195,15 @@ def send_to_callback_list(callback_url: str, notices: List[dict], auth_token: st
 @app.post("/scheduler/send-notifications")
 async def handle_notification_scheduler():
     now = datetime.now(TIMEZONE)
-    # 1. 현재 '시(Hour)' 정보를 가져와서 검색용 시간대 생성 (예: 14:00:00)
     current_hour_start = now.replace(minute=0, second=0, microsecond=0).strftime("%H:%M:%S")
     
     LOG.info(f"⏰ 알림 발송 스케줄러 가동 중... (대상 시간대: {current_hour_start})")
     
     try:
-        # 2. 유저의 alarm_time이 현재 시간대(정각 기준)와 일치하는 대상 조회
-        # 데이터베이스의 alarm_time 형식이 '14:00:00' 형태라고 가정해.
         user_res = supabase.table("users") \
             .select("*") \
             .eq("alarm_time", current_hour_start) \
             .execute()
-        LOG.info(f"ℹ️ {user_res} : user_res.")
         
         target_users = user_res.data
         if not target_users:
@@ -224,44 +220,38 @@ async def handle_notification_scheduler():
                 .eq("is_sent", False).execute()
             
             notis = noti_res.data
-            if not notis: continue
+            if not notis: 
+                LOG.info(f"ℹ️ {user['username']}님: 보낼 새 공지가 없습니다.")
+                continue
 
-            # 2. [핵심] 제목들을 수겸님이 정한 묶음 형식으로 만들기
-            # 가독성을 위해 불렛 포인트(•)와 줄바꿈(\n)을 섞어주는 게 좋아
-            titles = [f"• {n['title']}" for n in notis[:5]] # 너무 길면 잘리니 최대 5개만
+            # 2. 제목 묶기 (최대 5개)
+            titles = [f"• {n['title']}" for n in notis[:5]]
             combined_titles = "\n".join(titles)
-            
             if len(notis) > 5:
                 combined_titles += f"\n외 {len(notis) - 5}건이 더 있습니다."
 
-            # 3. 수겸님이 정해준 단 하나의 params 세트 구성
+            # 3. 파라미터 구성 (첫 번째 링크 사용)
             params = {
-                "korean-title": combined_titles,      # 여기에 묶인 제목들이 통째로!
+                "korean-title": combined_titles,
                 "customer-name": user['username'],
-                "article-link": notis[0]['original_url'] # 대표 링크는 가장 최신 것으로
+                "article-link": notis[0]['original_url']
             }
 
-            # 4. 발송 및 업데이트
+            # 4. 발송
             clean_phone = user['phone_number'].replace("-", "")
             api_resp = send_kakao(clean_phone, "send-article", params)
 
+            # 5. 상태 업데이트 (성공 시에만)
             if "error" not in api_resp:
-                # 보낸 공지들 ID만 추출해서 한꺼번에 '보냄' 처리
                 noti_ids = [n["id"] for n in notis]
                 supabase.table("notifications") \
                     .update({"is_sent": True}) \
                     .in_("id", noti_ids).execute()
                 
-                LOG.info(f"✅ {user['username']}님께 묶음 알림 1통 전송 완료")
-#            supabase.table("users") \
-#               .update({"last_sent_at": now.isoformat()}) \
-#                .eq("user_id", user["user_id"]) \
-#                .execute()
+                total_sent_all_users += 1 # 발송한 카톡 통수 카운트
+                LOG.info(f"✅ {user['username']}님께 공지 {len(notis)}건 묶음 발송 완료")
             
-            LOG.info(f"✅ {user['username']}님에게 {sent_count}건의 알림 전송 완료")
-
-        # 4. [중요] 모든 유저 순회 후 결과 리턴 (루프 밖으로 이동)
-        return {"status": "SUCCESS", "total_sent": total_sent_all_users}
+        return {"status": "SUCCESS", "total_sent_user_count": total_sent_all_users}
 
     except Exception as e:
         LOG.error(f"💥 스케줄러 실행 에러: {traceback.format_exc()}")
