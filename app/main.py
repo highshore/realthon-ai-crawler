@@ -194,58 +194,75 @@ def send_to_callback_list(callback_url: str, notices: List[dict], auth_token: st
         print(f"❌ 콜백 전송 실패: {e}")
 @app.post("/scheduler/send-notifications")
 async def handle_notification_scheduler():
-    now = datetime.now()
-    # 30분 단위 스케줄러이므로 초는 00으로 고정해서 비교
-    current_time_min = now.strftime("%H:%M") 
-    search_time = f"{current_time_min}:00"
-    LOG.info(f"⏰ 스케줄러 작동 중... (조회 시간: {search_time})")
+    now = datetime.now(TIMEZONE)
+    # 1. 현재 '시(Hour)' 정보를 가져와서 검색용 시간대 생성 (예: 14:00:00)
+    current_hour_start = now.replace(minute=0, second=0, microsecond=0).strftime("%H:%M:%S")
+    
+    LOG.info(f"⏰ 알림 발송 스케줄러 가동 중... (대상 시간대: {current_hour_start})")
+    
     try:
-        # 1. 지금 알림이 필요한 유저들만 조회
-        user_res = supabase.table("users").select("*").eq("alarm_time", search_time).execute()
+        # 2. 유저의 alarm_time이 현재 시간대(정각 기준)와 일치하는 대상 조회
+        # 데이터베이스의 alarm_time 형식이 '14:00:00' 형태라고 가정해.
+        user_res = supabase.table("users") \
+            .select("*") \
+            .eq("alarm_time", current_hour_start) \
+            .execute()
+        
         target_users = user_res.data
+        if not target_users:
+            LOG.info(f"ℹ️ {current_hour_start} 시간대에 설정된 알람이 없습니다.")
+            return {"status": "SUCCESS", "message": "No target users for this hour."}
+
+        total_sent_all_users = 0
 
         for user in target_users:
-            sent_count = 0
-
-            # 1. 주기 체크 (생략 - 기존 로직 유지)
-
-            # 2. 이 유저에게 쌓인 안 보낸 공지들 가져오기
+            # 해당 유저에게 보낼 안 읽은 알림들 조회 (최근 긁어온 것들 포함)
             noti_res = supabase.table("notifications") \
                 .select("*") \
                 .eq("user_id", user["user_id"]) \
-                .eq("is_sent", False).execute()
+                .eq("is_sent", False) \
+                .execute()
             
             notis = noti_res.data
-            if not notis: continue
+            if not notis:
+                continue
 
-            # 🔥 [수겸님 가이드 반영] 공지마다 카톡을 따로 전송
+            sent_count = 0
             for noti in notis:
-                # 3. 수겸님이 정해준 양식(Parameter)에 정확히 맞추기
+                # 카톡 발송 파라미터 구성
                 params = {
-                    "korean-title": noti['title'],     # 제목
-                    "customer-name": user['username'], # 이름
-                    "article-link": noti['original_url'] # 링크
+                    "korean-title": noti['title'],
+                    "customer-name": user['username'],
+                    "article-link": noti['original_url']
                 }
 
-                # 4. 발송
                 clean_phone = user['phone_number'].replace("-", "")
                 api_resp = send_kakao(clean_phone, "send-article", params)
 
-                # 5. 발송 성공 시 해당 공지만 '보냄' 처리
                 if "error" not in api_resp:
+                    # 발송 성공 시 개별 공지 상태 업데이트
                     supabase.table("notifications") \
                         .update({"is_sent": True}) \
-                        .eq("id", noti["id"]).execute()
+                        .eq("id", noti["id"]) \
+                        .execute()
                     sent_count += 1
             
-            # 유저별 발송 완료 후 전송 시점 기록
-            supabase.table("users").update({"last_sent_at": now.isoformat()}).eq("user_id", user["user_id"]).execute()
-            return {"status": "SUCCESS", "total_sent": sent_count}
+            total_sent_all_users += sent_count
+            
+            # 3. 유저별 발송 완료 후 전송 시점 기록 (중복 발송 방지용으로 활용 가능)
+            supabase.table("users") \
+                .update({"last_sent_at": now.isoformat()}) \
+                .eq("user_id", user["user_id"]) \
+                .execute()
+            
+            LOG.info(f"✅ {user['username']}님에게 {sent_count}건의 알림 전송 완료")
+
+        # 4. [중요] 모든 유저 순회 후 결과 리턴 (루프 밖으로 이동)
+        return {"status": "SUCCESS", "total_sent": total_sent_all_users}
 
     except Exception as e:
-        LOG.error(f"💥 스케줄러 실행 에러: {e}")
-    
-
+        LOG.error(f"💥 스케줄러 실행 에러: {traceback.format_exc()}")
+        return {"status": "ERROR", "message": str(e)}
 def send_kakao(contact: str, template_code: str, template_param: dict[str, str]) -> dict[str, Any]:
     # 🔴 주의: SENDER_KEY, SECRET_KEY, APP_KEY는 os.getenv 등으로 가져온 상태여야 함!
     payload = {
