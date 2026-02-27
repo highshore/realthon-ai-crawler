@@ -217,41 +217,40 @@ async def handle_notification_scheduler():
         total_sent_all_users = 0
 
         for user in target_users:
-            # 해당 유저에게 보낼 안 읽은 알림들 조회 (최근 긁어온 것들 포함)
             noti_res = supabase.table("notifications") \
                 .select("*") \
                 .eq("user_id", user["user_id"]) \
-                .eq("is_sent", False) \
-                .execute()
-            LOG.info(f"ℹ️ {noti_res} : noti_res.")
+                .eq("is_sent", False).execute()
             
             notis = noti_res.data
-            if not notis:
-                continue
+            if not notis: continue
 
-            sent_count = 0
-            for noti in notis:
-                # 카톡 발송 파라미터 구성
-                params = {
-                    "korean-title": noti['title'],
-                    "customer-name": user['username'],
-                    "article-link": noti['original_url']
-                }
-
-                clean_phone = user['phone_number'].replace("-", "")
-                api_resp = send_kakao(clean_phone, "send-article", params)
-                LOG.info(f"📡 카카오 API 응답: {api_resp}")
-
-                if "error" not in api_resp:
-                    # 발송 성공 시 개별 공지 상태 업데이트
-                    supabase.table("notifications") \
-                        .update({"is_sent": True}) \
-                        .eq("user_id", noti["user_id"]) \
-                        .execute()
-                    sent_count += 1
+            # 1. 공지사항 묶기 (예: "- 공지제목1\n- 공지제목2")
+            titles_list = [f"• {noti['title']}" for noti in notis]
+            combined_titles = "\n".join(titles_list)
             
-            total_sent_all_users += sent_count
-            
+            # 2. 첫 번째 공지 링크를 대표 링크로 쓰거나, 메인 페이지 링크 사용
+            representative_link = notis[0]['original_url'] 
+
+            # 3. 카톡 파라미터 구성 (템플릿에 맞게 조정)
+            params = {
+                "korean-title": combined_titles,      # 여기에 묶인 제목들이 들어감
+                "customer-name": user['username'],
+                "article-link": representative_link   # 상세 내용은 앱/웹에서 보라고 유도
+            }
+
+            clean_phone = user['phone_number'].replace("-", "")
+            api_resp = send_kakao(clean_phone, "send-article", params)
+
+            # 4. 발송 성공 시 이 유저의 모든 공지를 '보냄' 처리
+            if "error" not in api_resp:
+                # 리스트로 묶어서 한 번에 업데이트 (성능 향상)
+                noti_ids = [noti["id"] for noti in notis]
+                supabase.table("notifications") \
+                    .update({"is_sent": True}) \
+                    .in_("id", noti_ids).execute()
+                
+                total_sent_all_users += 1 # 한 유저당 1건으로 카운트            
             # 3. 유저별 발송 완료 후 전송 시점 기록 (중복 발송 방지용으로 활용 가능)
 
 #            supabase.table("users") \
