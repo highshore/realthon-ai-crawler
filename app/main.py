@@ -213,7 +213,7 @@ async def handle_notification_scheduler():
         total_sent_all_users = 0
 
         for user in target_users:
-            # 1. 보낼 공지들 가져오기
+            # 1. 해당 유저의 미발송 공지 조회
             noti_res = supabase.table("notifications") \
                 .select("*") \
                 .eq("user_id", user["user_id"]) \
@@ -230,31 +230,38 @@ async def handle_notification_scheduler():
             if len(notis) > 5:
                 combined_titles += f"\n외 {len(notis) - 5}건이 더 있습니다."
 
-            # 3. 파라미터 구성 (첫 번째 링크 사용)
+            # 3. 알림톡 파라미터 구성
             params = {
                 "korean-title": combined_titles,
                 "customer-name": user['username'],
-                "article-link": notis[0]['original_url']
+                "article-link": notis[0]['original_url'] # 가장 최근 공지 링크
             }
 
-            # 4. 발송
+            # 4. 실제 카카오톡 발송
             clean_phone = user['phone_number'].replace("-", "")
             api_resp = send_kakao(clean_phone, "send-article", params)
 
-            # 5. 상태 업데이트 (성공 시에만)
+            # 5. 발송 성공 시 DB 업데이트
+            # API 응답에 에러가 없고, 응답 코드가 성공(일반적으로 "S" 또는 resultCode 0)인지 확인
             if "error" not in api_resp:
                 noti_ids = [n["id"] for n in notis]
-                supabase.table("notifications") \
+                # Supabase 업데이트 실행
+                update_res = supabase.table("notifications") \
                     .update({"is_sent": True}) \
                     .in_("id", noti_ids).execute()
                 
-                total_sent_all_users += 1 # 발송한 카톡 통수 카운트
+                total_sent_all_users += 1 
                 LOG.info(f"✅ {user['username']}님께 공지 {len(notis)}건 묶음 발송 완료")
-            
+            else:
+                LOG.error(f"❌ {user['username']}님 발송 실패: {api_resp}")
+
+        # 모든 유저 처리가 끝난 후 최종 결과 반환
         return {"status": "SUCCESS", "total_sent_user_count": total_sent_all_users}
 
     except Exception as e:
-        LOG.error(f"💥 스케줄러 실행 에러: {traceback.format_exc()}")
+        # traceback을 통해 정확한 에러 위치 파악
+        error_msg = traceback.format_exc()
+        LOG.error(f"💥 스케줄러 실행 에러: {error_msg}")
         return {"status": "ERROR", "message": str(e)}
 def send_kakao(contact: str, template_code: str, template_param: dict[str, str]) -> dict[str, Any]:
     # 🔴 주의: SENDER_KEY, SECRET_KEY, APP_KEY는 os.getenv 등으로 가져온 상태여야 함!
