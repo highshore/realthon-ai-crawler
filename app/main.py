@@ -244,11 +244,11 @@ async def handle_notification_scheduler():
             # 5. 발송 성공 시 DB 업데이트
             # API 응답에 에러가 없고, 응답 코드가 성공(일반적으로 "S" 또는 resultCode 0)인지 확인
             if "error" not in api_resp:
-                noti_ids = [n["id"] for n in notis]
+                noti_ids = [n["user_id"] for n in notis]
                 # Supabase 업데이트 실행
                 update_res = supabase.table("notifications") \
                     .update({"is_sent": True}) \
-                    .in_("id", noti_ids).execute()
+                    .in_("user_id", noti_ids).execute()
                 
                 total_sent_all_users += 1 
                 LOG.info(f"✅ {user['username']}님께 공지 {len(notis)}건 묶음 발송 완료")
