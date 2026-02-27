@@ -223,6 +223,7 @@ async def handle_notification_scheduler():
                 .eq("user_id", user["user_id"]) \
                 .eq("is_sent", False) \
                 .execute()
+            LOG.info(f"ℹ️ {noti_res} : noti_res.")
             
             notis = noti_res.data
             if not notis:
@@ -239,6 +240,7 @@ async def handle_notification_scheduler():
 
                 clean_phone = user['phone_number'].replace("-", "")
                 api_resp = send_kakao(clean_phone, "send-article", params)
+                LOG.info(f"📡 카카오 API 응답: {api_resp}")
 
                 if "error" not in api_resp:
                     # 발송 성공 시 개별 공지 상태 업데이트
