@@ -287,8 +287,8 @@ def send_kakao(contact: str, template_code: str, template_param: dict[str, str])
         resp = session.post(url, json=payload, headers=headers, timeout=HTTP_TIMEOUT)
         
         # 로그 기록
-        LOG.info(f"Kakao API 응답 상태: {resp.status_code}")
-        
+        result_json = resp.json()
+        LOG.info(f"📡 Kakao API Response Detail: {json.dumps(result_json, ensure_ascii=False)}")        
         if resp.status_code != 200:
             LOG.error(f"Kakao send failed ({resp.status_code}) {resp.text}")
             return {"error": "API_STATUS_ERROR", "status": resp.status_code, "detail": resp.text}
