@@ -207,6 +207,7 @@ async def handle_notification_scheduler():
             .select("*") \
             .eq("alarm_time", current_hour_start) \
             .execute()
+        LOG.info(f"ℹ️ {user_res} : user_res.")
         
         target_users = user_res.data
         if not target_users:
