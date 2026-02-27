@@ -251,10 +251,11 @@ async def handle_notification_scheduler():
             total_sent_all_users += sent_count
             
             # 3. 유저별 발송 완료 후 전송 시점 기록 (중복 발송 방지용으로 활용 가능)
-            supabase.table("users") \
-                .update({"last_sent_at": now.isoformat()}) \
-                .eq("user_id", user["user_id"]) \
-                .execute()
+
+#            supabase.table("users") \
+#               .update({"last_sent_at": now.isoformat()}) \
+#                .eq("user_id", user["user_id"]) \
+#                .execute()
             
             LOG.info(f"✅ {user['username']}님에게 {sent_count}건의 알림 전송 완료")
 
