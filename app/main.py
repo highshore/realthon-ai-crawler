@@ -217,6 +217,7 @@ async def handle_notification_scheduler():
         total_sent_all_users = 0
 
         for user in target_users:
+            # 1. 해당 유저에게 보낼 모든 안 읽은 공지 가져오기
             noti_res = supabase.table("notifications") \
                 .select("*") \
                 .eq("user_id", user["user_id"]) \
@@ -225,33 +226,31 @@ async def handle_notification_scheduler():
             notis = noti_res.data
             if not notis: continue
 
-            # 1. 공지사항 묶기 (예: "- 공지제목1\n- 공지제목2")
-            titles_list = [f"• {noti['title']}" for noti in notis]
-            combined_titles = "\n".join(titles_list)
+            # 2. 여러 공지 제목을 하나의 문자열로 합치기
+            # 예: "• 공지1\n• 공지2\n• 공지3"
+            combined_titles = "\n".join([f"• {n['title']}" for n in notis])
             
-            # 2. 첫 번째 공지 링크를 대표 링크로 쓰거나, 메인 페이지 링크 사용
-            representative_link = notis[0]['original_url'] 
-
-            # 3. 카톡 파라미터 구성 (템플릿에 맞게 조정)
+            # 3. 템플릿 파라미터 구성
+            # 'korean-title' 자리에 합쳐진 문자열을 통째로 넣어버려!
             params = {
-                "korean-title": combined_titles,      # 여기에 묶인 제목들이 들어감
+                "korean-title": combined_titles,
                 "customer-name": user['username'],
-                "article-link": representative_link   # 상세 내용은 앱/웹에서 보라고 유도
+                "article-link": "https://www.korea.ac.kr/user/boardList.do?boardId=1462" # 대표 링크 혹은 첫 공지 링크
             }
 
             clean_phone = user['phone_number'].replace("-", "")
+            
+            # 4. 카톡은 딱 한 번만 전송!
             api_resp = send_kakao(clean_phone, "send-article", params)
 
-            # 4. 발송 성공 시 이 유저의 모든 공지를 '보냄' 처리
+            # 5. 발송 성공 시 이 유저의 공지들을 모두 '보냄' 처리
             if "error" not in api_resp:
-                # 리스트로 묶어서 한 번에 업데이트 (성능 향상)
-                noti_ids = [noti["id"] for noti in notis]
+                noti_ids = [n["id"] for n in notis]
                 supabase.table("notifications") \
                     .update({"is_sent": True}) \
                     .in_("id", noti_ids).execute()
                 
-                total_sent_all_users += 1 # 한 유저당 1건으로 카운트            
-            # 3. 유저별 발송 완료 후 전송 시점 기록 (중복 발송 방지용으로 활용 가능)
+                LOG.info(f"✅ {user['username']}님에게 공지 {len(notis)}건 묶음 발송 완료")            # 3. 유저별 발송 완료 후 전송 시점 기록 (중복 발송 방지용으로 활용 가능)
 
 #            supabase.table("users") \
 #               .update({"last_sent_at": now.isoformat()}) \
