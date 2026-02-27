@@ -244,7 +244,7 @@ async def handle_notification_scheduler():
                     # 발송 성공 시 개별 공지 상태 업데이트
                     supabase.table("notifications") \
                         .update({"is_sent": True}) \
-                        .eq("id", noti["id"]) \
+                        .eq("id", noti["user_id"]) \
                         .execute()
                     sent_count += 1
             
