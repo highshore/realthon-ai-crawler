@@ -1,112 +1,74 @@
+🚀 AI 공지사항 스마트 알리미 (Notice Alarm Service)
+이 프로젝트는 대학교 공지사항을 수집하고, Gemini AI로 맞춤형 정보를 선별하여 Supabase DB에 저장한 뒤, 사용자별 설정 시간에 맞춰 **카카오 알림톡(NHN Cloud)**으로 요약 발송하는 GCP Cloud Run 기반의 풀스택 자동화 서비스입니다.
 
+🏗️ 시스템 아키텍처 및 워크플로우
+Crawl Dispatcher: Cloud Scheduler가 /scheduler/dispatch-crawl을 호출하여 모든 유저의 크롤링을 시작합니다.
 
-# 🚀 AI 공지사항 크롤러 서비스 (Crawler Service)
+AI 분석 및 필터링: Gemini가 유저 프로필과 공지 제목을 대조하여 적합도 점수(0.0~1.0)를 매깁니다.
 
-이 프로젝트는 대학교 공지사항을 수집하고, **Gemini AI**를 활용하여 사용자의 전공 및 관심 분야에 맞는 공지사항을 선별하여 요약하는 **GCP Cloud Run** 기반의 마이크로서비스입니다.
+Data Storage (Callback): 분석된 공지 중 중복되지 않은 신규 데이터만 Supabase notifications 테이블에 is_sent=False 상태로 저장합니다.
 
-## 🏗️ 시스템 아키텍처 및 흐름
+Smart Notification: 설정된 알람 시간(예: 15:00)이 되면 /scheduler/send-notifications가 작동합니다.
 
-1. **Trigger**: Cloud Scheduler가 설정된 주기에 따라 FastAPI 엔드포인트를 호출합니다.
-2. **1차 크롤링**: `intervalDays` 설정을 확인하여 기준 날짜 이후의 최신 공지만 목록화합니다.
-3. **AI 분석**: 유저의 `interestFields`와 공지 제목을 비교하여 중요도 점수(0~1)를 산출합니다.
-4. **2차 크롤링**: 고득점 공지에 한해 상세 본문 및 이미지(OCR)를 추출하고 내용을 요약합니다.
-5. **Data Delivery**: 최종 분석된 JSON 결과를 백엔드 서버로 전송합니다.
+Batch Messaging: 한 유저에게 쌓인 여러 개의 신규 공지를 하나의 카카오 알림톡으로 묶어서 발송하여 피로도를 낮추고 비용을 절감합니다.
 
----
+📂 주요 파일 구조 및 역할
+app/main.py: 서비스의 메인 컨트롤러. API 엔드포인트 정의 및 전체 프로세스 오케스트레이션.
 
-## 📂 주요 파일 구조 및 역할
+app/jobs/korea_university.py: 고려대학교 맞춤형 크롤링 및 AI 분석 핵심 로직.
 
-실행 순서에 따라 함수가 배치되어 있습니다.
+주요 엔드포인트:
 
-* `app/main.py`: 서비스의 입구입니다. Pydantic 모델을 통해 입력 데이터의 유효성을 검증하고 크롤링 작업을 할당합니다.
-* `app/jobs/korea_university.py`: 실제 크롤링 및 AI 분석 로직이 포함된 핵심 파일입니다.
-* `parse_posts`: 목록 수집 및 날짜 필터링 (중복 수집 방지)
-* `score_notice`: 유저 맞춤형 AI 스코어링
-* `fetch_post_content`: 상세 본문 및 이미지 URL 추출
-* `extract_text_from_image`: Tesseract를 이용한 이미지 내 텍스트 추출(OCR)
-* `run`: 전체 프로세스 총괄 및 최종 Output 생성
+/scheduler/dispatch-crawl: 전체 유저 대상 크롤링 트리거.
 
+/callback/save: 크롤링 결과 수신 및 Supabase DB 저장 (중복 체크 포함).
 
+/scheduler/send-notifications: 유저별 알람 시간대에 맞춘 카톡 묶음 발송.
 
----
+🛠️ 설치 및 로컬 실행 방법
+1. 필수 요구사항
+Python 3.10+
 
-## 🛠️ 설치 및 로컬 실행 방법
+Tesseract OCR 엔진 (이미지 분석용)
 
-### 1. 필수 요구사항
+2. 환경 변수 설정 (.env)
+코드 스니펫
+# AI & Database
+GEMINI_API_KEY=your_key
+SUPABASE_URL=your_url
+SUPABASE_KEY=your_key
 
-* Python 3.10+
-* Tesseract OCR 엔진 (시스템 설치 필요)
+# Kakao Alimtalk (NHN Cloud)
+KAKAO_SENDER_KEY=your_sender_key
+KAKAO_SECRET_KEY=your_secret_key
+KAKAO_APP_KEY=your_app_key
 
-### 2. 환경 변수 설정 (`.env`)
-
-프로젝트 루트에 `.env` 파일을 생성하고 다음 정보를 입력하세요.
-
-```env
-GEMINI_API_KEY=your_api_key_here
+# Environment
+BASE_URL="https://notice-alarm-service-567168557796.asia-northeast3.run.app"
 PORT=8080
-LOG_LEVEL=INFO
-
-```
-
-### 3. 라이브러리 설치 및 실행
-
-```bash
-pip install -r requirements.txt
-python app/main.py
-
-```
-python app/main.py 안되면 path 설정 - 
-(.venv) PS C:\Users\user\crawler-project> 
+3. 로컬 실행
+Bash
+# 가상환경 활성화 후
 $env:PYTHONPATH += ";."
 python app/main.py
----
+📡 API 규격 (Key Interfaces)
+POST /scheduler/send-notifications
+현재 시간대에 설정된 유저들에게 알림을 발송합니다. (Cloud Scheduler 전용)
 
-## 📡 API 규격 (Interface)
+작동 로직:
 
-### **POST /crawl**
+users 테이블에서 alarm_time이 현재 '시(Hour)'와 일치하는 유저 조회.
 
-사용자의 프로필 정보를 받아 맞춤형 크롤링을 수행합니다.
+notifications 테이블에서 is_sent=False인 해당 유저의 공지 수집.
 
-**Request Body 예시:**
+최대 n개의 제목을 줄바꿈(\n)으로 묶어 카카오 알림톡 전송.
 
-```json
-{
-  "userId": "user_12345",
-  "targetUrl": "https://info.korea.ac.kr/info/board/notice_under.do",
-  "userProfile": {
-    "username": "양은서",
-    "major": "컴퓨터공학과",
-    "interestFields": ["AI", "BACKEND"],
-    "intervalDays": 3,
-    "alarmTime": "09:30:00"
-  }
-}
+전송 성공 시 해당 공지들의 is_sent를 True로 업데이트.
 
-```
+💡 개발 및 운영 가이드 (Note)
+중복 발송 방지: notifications 테이블의 original_url을 기준으로 중복 저장을 방지하며, 발송 후 즉시 상태값을 변경하여 안정성을 확보했습니다.
 
-**Response Body 예시:**
+비용 최적화: 낱개 발송이 아닌 **묶음 발송(Batching)**을 통해 알림톡 발송 비용을 획기적으로 줄였습니다.
 
-```json
-{
-  "status": "SUCCESS",
-  "relevanceScore": 0.95,
-  "data": {
-    "title": "2026 AI 해커톤 참가자 모집",
-    "summary": "AI 분야 역량을 강화할 수 있는 기회로, 백엔드 개발 경험이 있는 학생을 우대합니다.",
-    "originalUrl": "https://info.korea.ac.kr/...",
-    "timestamp": "2026-01-24T01:18:00Z"
-  }
-}
-
-```
-
----
-
-## 💡 협업자 가이드 (Note)
-
-* **비용 효율**: `parse_posts` 함수는 기준 날짜 이전의 글을 발견하면 즉시 루프를 중단하도록 설계되어 불필요한 연산을 방지합니다.
-* **알림 발송**: 이 서비스는 분석 결과만 반환합니다. 실제 카카오톡 발송은 백엔드 서버에서 처리해야 합니다.
-* **OCR**: 이미지 분석 성능을 높이기 위해 `preprocess_for_ocr`에서 전처리를 수행합니다.
-
----
+유연한 시간 매칭: 스케줄러 실행 시 분 단위 오차를 허용하기 위해 '시(Hour)' 단위 매칭 로직을 적용했습니다.
 
