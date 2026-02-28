@@ -53,14 +53,14 @@ class CallbackConfig(BaseModel):
     enabled: bool = True         # 👈 추가
     callbackUrl: str      # 👈 추가
     authToken: str
-class BatchRequest(BaseModel):
+class BatchRequest(BaseModel):         
     targetUrls: List[str]  # targetUrl(str)에서 targetUrls(List[str])로 변경!
     userId: int
     userProfile: UserProfile
     summary: str
     callback: CallbackConfig
 
-# --- 엔드포인트 1: 크롤링 요청 ---
+# --- 엔드포인트 1: 크롤링 요청 --- 지금은 안씀 그냥 남겨둚.
 @app.post("/crawl/request")
 async def handle_crawl(request_data: BatchRequest):
     try:
