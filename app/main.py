@@ -14,10 +14,10 @@ from typing import List, Optional
 
 # 크롤링 로직 임포트
 from supabase import create_client, Client
-from app.jobs.korea_university import TIMEZONE, run 
+from app.jobs.korea_university import TIMEZONE
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-
+from app.jobs.orchestrator import run  # 이렇게 경로만 바꿔줍니다.
 # 로깅 설정 (없다면 추가)
 LOG = logging.getLogger(__name__)
 # 세션 설정 (없다면 추가, 성능을 위해 세션을 재사용하는 게 좋아)
