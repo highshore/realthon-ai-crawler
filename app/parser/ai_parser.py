@@ -2,7 +2,11 @@ import os
 import json
 import re
 from google import genai
+from dotenv import load_dotenv
 
+from app.engine.static_fetcher import LOG
+
+load_dotenv()  # .env 파일을 읽어서 환경변수로 등록
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 def parse_with_ai(content, base_url, user_profile):
@@ -20,6 +24,7 @@ def parse_with_ai(content, base_url, user_profile):
     내용:
     {content[:15000]}
     """
+    print(f"🤖 AI 파싱 시작 (URL: {base_url}, 관심분야: {interests})")
     
     try:
         response = client.models.generate_content(
