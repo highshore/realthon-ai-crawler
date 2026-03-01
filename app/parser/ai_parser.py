@@ -24,6 +24,7 @@ def parse_with_ai(content, base_url, user_profile):
     내용:
     {content[:15000]}
     """
+    LOG.info(f"수집된 텍스트 샘플: {content[:100]}")
     print(f"🤖 AI 파싱 시작 (URL: {base_url}, 관심분야: {interests})")
     
     try:

@@ -1,5 +1,10 @@
 import asyncio
 import sys
+
+# [1. 최상단 고정] Windows에서 Playwright 브라우저 실행을 위한 루프 정책 설정
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
 import os
 import logging
 import traceback
@@ -15,9 +20,6 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
 
-# [1. 최상단 고정] Windows에서 Playwright 브라우저 실행을 위한 루프 정책 설정
-if sys.platform == 'win32':
-    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 # [2. 내부 모듈 임포트] 루프 정책 설정 후에 진행
 from app.jobs.orchestrator import run, TIMEZONE
@@ -117,6 +119,7 @@ def send_to_callback_list(callback_url: str, notices: List[dict], auth_token: st
 @app.post("/scheduler/dispatch-crawl")
 async def handle_crawl_dispatch():
     try:
+        # 1. 전체 유저 목록 조회
         user_res = supabase.table("users").select("*").execute() 
         target_users = user_res.data
         LOG.info(f"🚀 디스패처 시작 - 대상 유저: {len(target_users)}명")
@@ -125,21 +128,48 @@ async def handle_crawl_dispatch():
         base_url = os.getenv("BASE_URL", "http://localhost:8080").rstrip("/")
 
         for user in target_users:
-            url_res = supabase.table("target_urls").select("target_url").eq("user_id", user["user_id"]).execute()
+            # users 테이블의 기본키인 user_id를 가져옴
+            u_id = user["user_id"]
+            
+            # 2. [수정] user_interest_field 테이블 조회
+            # 컬럼명: interest_field, 조인키: user_user_id
+            interest_res = supabase.table("user_interest_field") \
+                .select("interest_field") \
+                .eq("user_user_id", u_id).execute()
+            
+            # 실제 관심 키워드 리스트 추출 (예: ["AI", "장학금"])
+            interests = [item["interest_field"] for item in interest_res.data]
+            
+            # 3. 유저가 구독 중인 URL 목록 가져오기
+            url_res = supabase.table("target_urls").select("target_url").eq("user_id", u_id).execute()
             urls = [item["target_url"] for item in url_res.data]
             
             for url in urls:
                 site_name = guess_site_name(url)
+                
                 crawl_event = {
-                    "userId": user["user_id"],
+                    "userId": u_id,
                     "targetUrls": [url],
                     "siteName": site_name,
-                    "userProfile": {"username": user.get("username")},
+                    "userProfile": {
+                        "username": user.get("username"),
+                        "major": user.get("major"),
+                        "interestFields": interests  # 👈 정확한 관심 키워드 리스트 전달
+                    },
                     "callbackUrl": f"{base_url}/callback/save"
                 }
 
-                LOG.info(f"📡 [DISPATCH] {user.get('username')}님 - {site_name} 시작")
+                LOG.info(f"📡 [DISPATCH] {user.get('username')}님 - {site_name} 시작 (관심분야: {interests})")
+                
+                # 비동기 실행 (await 잊지 말기!)
                 result = await run(crawl_event) 
+                actual_notices = result.get("data", [])
+                LOG.info(f"📊 [SUMMARY] {user.get('username')}님 - {site_name} 결과: {len(actual_notices)}건 수집됨")
+                
+                for idx, notice in enumerate(actual_notices, 1):
+                    LOG.info(f"   [{idx}] {notice.get('title')}")               
+                LOG.info(f"🔍 DEBUG: run 결과 데이터 구조: {result.keys()}") # 어떤 키가 들어있는지 확인
+                LOG.info(f"📡 [DISPATCH] {user.get('username')}님 - {site_name} 완료: {result.get('status')}")
                 
                 if result.get("status") == "SUCCESS" and result.get("data"):
                     send_to_callback_list(
@@ -241,6 +271,10 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     return JSONResponse(status_code=422, content={"detail": exc.errors()})
 if __name__ == "__main__":
     import uvicorn
-    # 💡 Windows에서 NotImplementedError를 방지하기 위해 loop='asyncio'를 명시합니다.
-    # 또한 포트가 8080인지 다시 한번 확인하세요.
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8080, reload=True, loop="asyncio")
+    uvicorn.run(
+        "app.main:app",
+        host="0.0.0.0",
+        port=8080,
+        reload=False,  # ← 이게 핵심, True면 loop 설정이 무시됨
+        loop="asyncio"
+    )

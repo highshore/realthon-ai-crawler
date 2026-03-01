@@ -1,0 +1,23 @@
+{
+  "name": "crawler-project",
+  "version": "1.0.0",
+  "description": "🚀 AI 공지사항 스마트 알리미 (Notice Alarm Service) 이 프로젝트는 대학교 공지사항을 수집하고, Gemini AI로 맞춤형 정보를 선별하여 Supabase DB에 저장한 뒤, 사용자별 설정 시간에 맞춰 **카카오 알림톡(NHN Cloud)**으로 요약 발송하는 GCP Cloud Run 기반의 풀스택 자동화 서비스입니다.",
+  "main": "index.js",
+  "scripts": {},
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/highshore/realthon-ai-crawler.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/highshore/realthon-ai-crawler/issues"
+  },
+  "homepage": "https://github.com/highshore/realthon-ai-crawler#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "@types/node": "^25.3.3"
+  }
+}
