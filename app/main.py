@@ -1,6 +1,8 @@
 import asyncio
 import sys
 
+from dotenv import load_dotenv
+
 # [1. 최상단 고정] Windows에서 Playwright 브라우저 실행을 위한 루프 정책 설정
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
@@ -30,8 +32,12 @@ logging.basicConfig(level=logging.INFO)
 LOG = logging.getLogger(__name__)
 session = requests.Session()
 HTTP_TIMEOUT = 30
-
+logging.basicConfig(level=logging.INFO, format="%(message)s") # 포맷 단순화
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("google").setLevel(logging.WARNING)
+logging.getLogger("supabase").setLevel(logging.WARNING)
 # [3. 환경 변수 설정]
+load_dotenv() # 👈 이게 supabase 호출보다 위에 있는지 확인!
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SENDER_KEY = os.getenv("KAKAO_SENDER_KEY")
@@ -98,23 +104,23 @@ def send_kakao(contact: str, template_code: str, template_param: dict[str, str])
         return {"error": "CONNECTION_ERROR", "message": str(e)}
 
 # --- 내부 함수: 콜백 데이터 전송 ---
-def send_to_callback_list(callback_url: str, notices: List[dict], auth_token: str, user_id: int):
-    scores = [float(item.get("relevanceScore", 0.0)) for item in notices]
-    top_score = round(max(scores), 2) if scores else 0.0
-
-    payload = {
-        "userId": str(user_id),
-        "relevanceScore": top_score,
-        "data": notices
-    }
-    headers = {"Content-Type": "application/json", "X-AI-CALLBACK-TOKEN": auth_token}
+async def send_to_callback_list(callback_url, notices, auth_token, user_id):
+    import httpx
+    payload = {"userId": user_id, "data": notices}
+    headers = {"Content-Type": "application/json"}
     
-    try:
-        resp = requests.post(callback_url, json=payload, headers=headers, timeout=HTTP_TIMEOUT)
-        LOG.info(f"📡 콜백 전송 완료 (상태코드: {resp.status_code})")
-    except Exception as e:
-        LOG.error(f"❌ 콜백 전송 실패: {e}")
-
+    async with httpx.AsyncClient() as client:
+        try:
+            # 🔍 발신 직전 로그
+            print(f"🚀 [SEND] 주소: {callback_url} | 유저: {user_id} | 건수: {len(notices)}")
+            
+            resp = await client.post(callback_url, json=payload, headers=headers, timeout=10.0)
+            
+            # 🔍 수신 결과 로그
+            print(f"📡 [RESPONSE] 상태코드: {resp.status_code} | 내용: {resp.text}")
+            return resp
+        except Exception as e:
+            print(f"❌ [SEND_ERROR] 호출 실패: {e}")
 # --- 엔드포인트: 크롤링 실행 디스패처 ---
 @app.post("/scheduler/dispatch-crawl")
 async def handle_crawl_dispatch():
@@ -125,7 +131,8 @@ async def handle_crawl_dispatch():
         LOG.info(f"🚀 디스패처 시작 - 대상 유저: {len(target_users)}명")
 
         processed_count = 0
-        base_url = os.getenv("BASE_URL", "http://localhost:8080").rstrip("/")
+        #base_url = os.getenv("BASE_URL", "http://localhost:8080").rstrip("/")
+        base_url = "http://127.0.0.1:8080"  # 👈 테스트 동안은 아예 이렇게 박아버려!
 
         for user in target_users:
             # users 테이블의 기본키인 user_id를 가져옴
@@ -172,7 +179,7 @@ async def handle_crawl_dispatch():
                 LOG.info(f"📡 [DISPATCH] {user.get('username')}님 - {site_name} 완료: {result.get('status')}")
                 
                 if result.get("status") == "SUCCESS" and result.get("data"):
-                    send_to_callback_list(
+                    await send_to_callback_list(
                         callback_url=crawl_event["callbackUrl"],
                         notices=result["data"],
                         auth_token="X-AI-CALLBACK-TOKEN",
@@ -201,30 +208,33 @@ async def handle_crawler_result(payload: CallbackData):
 
         insert_data = []
         for item in data_list:
-            # 💡 [핵심 수정] Pydantic 모델 객체이므로 getattr을 쓰거나 점(.)으로 접근해야 합니다.
-            # 객체일 경우를 대비해 getattr을 쓰고, 혹시 dict일 경우를 대비해 .get을 보조로 씁니다.
-            def get_val(obj, key, default=None):
+            def get_val(obj, key):
                 if hasattr(obj, 'get'): # dict인 경우
-                    return obj.get(key, default)
-                return getattr(obj, key, default) # 객체인 경우
+                    return obj.get(key)
+                return getattr(obj, key, None) # 객체인 경우
 
-            url = get_val(item, "originalUrl") or get_val(item, "original_url")
-            
-            if not url or url in existing_urls:
+            # 1. 값을 먼저 가져오고
+            raw_url = get_val(item, "originalUrl") or get_val(item, "original_url")
+            raw_title = get_val(item, "title")
+            raw_summary = get_val(item, "summary")
+            raw_source = get_val(item, "sourceName") or get_val(item, "source_name")
+            raw_category = get_val(item, "category")
+
+            if not raw_url or raw_url in existing_urls:
                 continue
 
+            # 2. 저장할 때 'or'를 써서 None이면 기본값으로 덮어쓰기
             insert_data.append({
                 "user_id": int(user_id),
-                "title": get_val(item, "title", "제목 없음"),
-                "summary": get_val(item, "summary", "요약 없음"),
-                "source_name": get_val(item, "sourceName", "지능형 크롤러"),
-                "original_url": url,
-                "category": get_val(item, "category", "일반"),
+                "title": raw_title or "제목 없음",
+                "summary": raw_summary or "요약 없음",
+                "source_name": raw_source or "고려대학교 정보대학",
+                "original_url": raw_url,
+                "category": raw_category or "일반공지", # 👈 여기서 null을 확실히 막음!
                 "is_liked": True,
-                "is_sent": False, # ✅ 발송 전 상태 기본값
-                "notice_date": datetime.now(TIMEZONE).isoformat(),
-            })
-
+                "is_sent": False,
+                "created_at": datetime.now(TIMEZONE).isoformat(), 
+            })        
         if insert_data:
             supabase.table("notifications").insert(insert_data).execute()
             LOG.info(f"✅ {user_id}번 유저 신규 {len(insert_data)}건 저장 완료")
