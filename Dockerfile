@@ -1,57 +1,37 @@
 # 1. 파이썬 환경 설정
 FROM python:3.11-slim
 
-# 2. 한글 및 로그 버퍼링 설정 (인코딩 에러 방지)
-ENV LANG=C.UTF-8 \
-    LC_ALL=C.UTF-8 \
-    PYTHONIOENCODING=utf-8 \
-    PYTHONUNBUFFERED=1
+# 보안 패치 업데이트 추가
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+# 2. 한글 및 로그 버퍼링 설정 (ASCII 에러 방지)
+ENV LANG C.UTF-8
+ENV LC_ALL C.UTF-8
+ENV PYTHONIOENCODING=utf-8
+ENV PYTHONUNBUFFERED=1
 
-# 3. 필수 시스템 패키지 설치 (Tesseract OCR + Playwright 의존성)
+# 3. 작업 디렉토리 설정
+
+# 4. 필수 라이브러리 설치 (Tesseract OCR 포함)
 RUN apt-get update && apt-get install -y \
-    # 기존 Tesseract OCR 관련
     tesseract-ocr \
     tesseract-ocr-kor \
     libgl1 \
-    # Playwright 및 브라우저 실행 관련 의존성
     libglib2.0-0 \
-    libnss3 \
-    libnspr4 \
-    libatk1.0-0 \
-    libatk-bridge2.0-0 \
-    libcups2 \
-    libdrm2 \
-    libdbus-1-3 \
-    libxcb1 \
-    libxkbcommon0 \
-    libx11-6 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxext6 \
-    libxfixes3 \
-    librandr2 \
-    libgbm1 \
-    libpango-1.0-0 \
-    libcairo2 \
-    libasound2 \
     && rm -rf /var/lib/apt/lists/*
-
-# 4. 작업 디렉토리 설정
-WORKDIR /app
-
-# 5. 종속성 설치
-# requirements.txt에 playwright와 markdownify가 포함되어 있어야 합니다.
+# 5. 종속성 파일 복사 및 설치
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install --no-cache-dir fastapi uvicorn
+RUN pip install fastapi uvicorn
 
-# 6. Playwright 브라우저 설치 (Chromium만 설치하여 용량 최적화)
-RUN playwright install chromium
-RUN playwright install-deps chromium
+# 코드 복사
+WORKDIR /app
 
-# 7. 코드 복사
 COPY . .
 
-# 8. 실행 명령어
-# app/main.py 안에 FastAPI 객체(app)가 있는 경우
+# 실행 명령어 (app/main.py 안에 app이 있으므로 아래와 같이 설정)
+# 만약 main.py가 root에 있다면 "main:app"으로 쓰세요.
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080"]
+
+# 6. [중요] 현재 폴더의 모든 코드를 컨테이너로 복사
+
+# 7. 실행 명령어
