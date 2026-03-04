@@ -55,24 +55,32 @@ def get_ai_friendly_html(html: str) -> str:
     if not html: return ""
     soup = BeautifulSoup(html, "html.parser")
 
-    # 1. 아예 필요 없는 덩어리 날리기 (header, footer, nav 등)
+    # 1. 노이즈 제거
     for noise in soup(["header", "footer", "nav", "script", "style", "aside"]):
         noise.decompose()
 
-    # 2. 진짜 본문 영역(main이나 #contents)만 타겟팅
-    main_area = soup.find("main") or soup.find(id="contents") or soup.find(id="__next") or soup
+    # 2. 본문 영역 탐색
+    # 🚨 수정 포인트: 순차적으로 찾고, 정 없으면 soup(전체)를 씀
+    main_area = (
+        soup.find("main") or 
+        soup.find(id="contents") or 
+        soup.find(id="container") or 
+        soup.find(id="root") or 
+        soup.find(id="__next")
+    )
     
-    # 3. 본문 영역 내에서 '공지 제목'일 가능성이 높은 <a> 태그만 추출
-    # - 텍스트 길이가 10자 이상이거나
-    # - 내부에 p, span, strong 태그가 있는 경우
+    # 🚨 [핵심] 만약 위에서 아무것도 못 찾으면(None), soup 전체를 대상으로 삼기!
+    if main_area is None:
+        main_area = soup
+
+    # 3. 데이터 추출
     clean_soup = BeautifulSoup("<div></div>", "html.parser")
     target_div = clean_soup.div
 
+    # 이제 main_area가 절대 None이 아니니까 find_all이 안 터짐!
     for a in main_area.find_all("a", href=True):
         title_text = a.get_text(strip=True)
-        # 💡 [핵심 필터] 너무 짧은 메뉴명(로그인, 홈 등)은 버리고 진짜 제목 같은 놈만!
-        if len(title_text) >= 10:
-            # 새로운 깨끗한 <a> 태그 생성 (href만 남김)
+        if len(title_text) >= 5: # 필터를 10자에서 5자로 살짝 낮춤 (토스 대응)
             new_a = clean_soup.new_tag("a", href=a['href'])
             new_a.string = title_text
             target_div.append(new_a)
