@@ -51,38 +51,30 @@ def clean_for_ai(html: str) -> str:
         tag.attrs = valid_attrs
     clean_html = soup.prettify()
     return clean_html[:25000] # 너무 길면 자르기
-def get_ai_friendly_html(html: str) -> str:
+def get_ai_friendly_html(html: str, mode: str = "list") -> str:
     if not html: return ""
     soup = BeautifulSoup(html, "html.parser")
 
-    # 1. 노이즈 제거
+    # 공통 노이즈 제거
     for noise in soup(["header", "footer", "nav", "script", "style", "aside"]):
         noise.decompose()
 
-    # 2. 본문 영역 탐색
-    # 🚨 수정 포인트: 순차적으로 찾고, 정 없으면 soup(전체)를 씀
-    main_area = (
-        soup.find("main") or 
-        soup.find(id="contents") or 
-        soup.find(id="container") or 
-        soup.find(id="root") or 
-        soup.find(id="__next")
-    )
-    
-    # 🚨 [핵심] 만약 위에서 아무것도 못 찾으면(None), soup 전체를 대상으로 삼기!
-    if main_area is None:
-        main_area = soup
+    # 본문 영역 탐색
+    main_area = soup.find("article") or soup.find("main") or soup.find(id="root")
+    if main_area is None: main_area = soup
 
-    # 3. 데이터 추출
-    clean_soup = BeautifulSoup("<div></div>", "html.parser")
-    target_div = clean_soup.div
-
-    # 이제 main_area가 절대 None이 아니니까 find_all이 안 터짐!
-    for a in main_area.find_all("a", href=True):
-        title_text = a.get_text(strip=True)
-        if len(title_text) >= 5: # 필터를 10자에서 5자로 살짝 낮춤 (토스 대응)
-            new_a = clean_soup.new_tag("a", href=a['href'])
-            new_a.string = title_text
-            target_div.append(new_a)
-
-    return str(target_div)[:25000]
+    # 🚨 [핵심] 모드에 따라 다르게!
+    if mode == "list":
+        # 목록 수집 시에는 제목/링크 위주로 (기존 방식)
+        clean_soup = BeautifulSoup("<div></div>", "html.parser")
+        target_div = clean_soup.div
+        for a in main_area.find_all("a", href=True):
+            title_text = a.get_text(strip=True)
+            if len(title_text) >= 5:
+                new_a = clean_soup.new_tag("a", href=a['href'])
+                new_a.string = title_text
+                target_div.append(new_a)
+        return str(target_div)
+    else:
+        # 🚨 본문 수집 시에는 링크 상관없이 '텍스트 전체'를 가져와야 함!
+        return main_area.get_text(separator="\n", strip=True)

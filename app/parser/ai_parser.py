@@ -3,33 +3,30 @@ import re
 import os
 from google import genai
 
-def parse_with_ai(html_content, base_url, user_profile):
-    interests = user_profile.get("interests", [])
-    if isinstance(interests, list):
-        interests = ", ".join(interests)
+# app/parser/ai_parser.py
 
-    # 1. AI에게 줄 데이터 요약 (토큰 절약 및 구조화)
+def parse_with_ai(text_content, url, user_profile):
+    interests = user_profile.get("interestFields", [])
+    
     prompt = f"""
-    당신은 채용/공지사항 JSON 변환기입니다. 
-    제공된 HTML에서 유저 관심사({interests})와 관련된 공고를 추출해 JSON 배열로만 응답하세요.
+    당신은 채용 공고 추출 전문가입니다. 
+    제공된 텍스트에서 유저의 관심사({interests})와 가장 잘 맞는 공고를 **최대 10개만** 찾아 JSON 배열로 응답하세요.
+    데이터가 너무 많으면 가장 최신/중요한 것 위주로 선별하세요.
 
-    [필수 스키마]:
+    [응답 스키마]:
     [
       {{
-        "title": "공고 제목",
-        "link": "URL 또는 ID 숫자",
-        "date": "YYYY-MM-DD",
+        "title": "공고명",
+        "link": "ID 또는 URL",
+        "date": "YYYY-MM-DD (모르면 빈칸)",
         "score": 0.0~1.0
       }}
     ]
 
-    [주의사항]:
-    - 관련이 적어도 리스트 형태면 모두 포함하되 score만 낮게 책정할 것.
-    - JSON 외에 설명이나 주석은 절대 금지.
-    - link가 없으면 해당 항목의 고유 ID(숫자)라도 넣을 것.
-
-    [HTML]:
-    {html_content[:15000]} 
+    [주의]: JSON 외의 설명은 절대 금지하며, 문자열 내부에 쌍따옴표(")를 쓸 때는 반드시 이스케이프(\") 처리하세요.
+    
+    [텍스트]:
+    {text_content[:12000]} # 👈 입력 텍스트도 1.2만 자로 제한해서 AI 부담 줄이기
     """
 
     try:
@@ -61,3 +58,37 @@ def parse_with_ai(html_content, base_url, user_profile):
         # 실패 로그에 AI가 뭐라고 뱉었는지 찍어보면 디버깅이 쉬워!
         # print(f"DEBUG: AI RAW RESPONSE: {response.text[:500]}")
         return []
+    # app/parser/ai_parser.py
+
+def summarize_content(content, user_profile):
+    """
+    본문 내용을 유저 관심사에 맞춰 3줄 요약합니다.
+    """
+    interests = user_profile.get("interestFields", [])
+    
+    # 🚨 본문이 너무 짧으면 요약할 필요가 없음
+    if len(content) < 100:
+        return content.strip()
+
+    prompt = f"""
+    당신은 커리어 컨설턴트입니다. 
+    다음 채용/공지 본문을 유저의 관심사({interests})를 중심으로 핵심만 3줄 요약하세요.
+    유저가 왜 이 공고를 읽어야 하는지 이유를 포함하세요.
+    말투는 친절한 '~해요' 체를 사용하세요.
+
+    [본문]
+    {content[:4000]} 
+    """
+    
+    try:
+        from google import genai
+        import os
+        client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=prompt
+        )
+        return response.text.strip()
+    except Exception as e:
+        print(f"❌ 요약 중 에러: {e}")
+        return content[:150].strip() + "..."
